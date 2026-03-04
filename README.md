@@ -1,6 +1,12 @@
-# BYUI eBadge ESP32-S3 – Project Template
+# BYUI Namebadge OTA
 
-A starter template for building applications on the **BYUI eBadge V3.0** hardware platform, powered by the ESP32-S3-Mini-1-N8. Use this template as the foundation for a new project — it includes all pin assignments, peripheral configuration, partition layout, and build scaffolding pre-configured for the badge hardware.
+A **permanent, unbrickable OTA bootloader** for the BYUI eBadge V3.0 (ESP32-S3-Mini-1-N8). The loader lives in the factory partition and provides three top-level capabilities via an on-device LCD menu:
+
+1. **Configure Device** — Wi-Fi SoftAP captive portal, accessible from any phone browser
+2. **Download App** — browse and install apps from a GitHub Pages-hosted catalog over HTTPS
+3. **Reset to Canvas** — wipe user apps and restore the badge to a clean, flash-ready state
+
+See [OBJECTIVES.md](OBJECTIVES.md) for the full project specification and milestones.
 
 ## Hardware Overview
 
@@ -117,6 +123,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for boot flow diagrams.
 
 | File | Contents |
 |------|----------|
+| [OBJECTIVES.md](OBJECTIVES.md) | Project goals, acceptance criteria, milestones |
 | [HARDWARE.md](HARDWARE.md) | Full pinout, peripheral wiring, BOM, datasheets |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Boot flow, memory map, OTA flow diagrams |
 | [SETUP_GUIDE.md](SETUP_GUIDE.md) | ESP-IDF install, WSL setup, serial port config |
