@@ -2,9 +2,45 @@
 
 ## Vision
 
-Build a **permanent, unbrickable bootloader** for the BYUI eBadge V3.0 that lives in the factory partition and acts as a friendly supervisor for the badge. Students never need a laptop or programmer to update their badge — the loader handles everything over Wi-Fi or USB.
+Build a **permanent, student-proof bootloader** for the BYUI eBadge V3.0 that:
 
-The loader presents a simple on-device menu (D-pad navigation, LCD display) and offers three top-level modes:
+- Lives in the ESP32-S3 **factory partition** and can never be accidentally erased by OTA
+- Runs student apps in **OTA partition slots** so a bad app never destroys the loader
+- Lets students configure, update, and reset their badge entirely from their phone — no laptop, no programmer, no USB cable needed for normal use
+- Has a clear, documented path to restore the bootloader itself if it somehow gets overwritten
+
+---
+
+## Partition Architecture
+
+Understanding the flash layout is essential to understanding why the loader is durable:
+
+```
+ROM Bootloader (in ESP32-S3 silicon — truly permanent, cannot be changed)
+  └─► ESP-IDF Bootloader @ 0x1000 (can be re-flashed but rarely touched)
+        └─► factory partition @ 0x20000  ← THIS LOADER LIVES HERE
+              |
+              ├── ota_0  ← student app slot
+              ├── ota_1  ← student app slot
+              └── ota_2  ← student app slot
+```
+
+**Why apps can't destroy the loader under normal operation:**
+- The ESP-IDF `esp_https_ota` API is physically incapable of writing to the factory partition — it is hard-coded to target OTA slots only.
+- The loader menu will never offer an option that calls `esp_partition_write()` on the factory region.
+- `idf.py flash` (USB/UART) *can* overwrite the factory partition — this is the one way a student can break the invariant, and Objective 4 covers recovery from exactly that.
+
+**What happens when an OTA app crashes:**
+- The ESP-IDF bootloader's app rollback detects a failed or unconfirmed app and automatically falls back to the factory partition. No student action needed.
+
+---
+
+The loader presents a simple on-device menu (D-pad navigation, LCD display) and offers three top-level modes plus a hardware recovery path:
+
+1. **Configure Device** — Wi-Fi SoftAP captive portal, phone-accessible
+2. **Download App** — browse and install from a GitHub Pages catalog
+3. **Reset to Canvas** — wipe user apps, return to clean state
+4. **Recovery** — restore the loader itself if it gets overwritten
 
 ---
 
@@ -13,10 +49,10 @@ The loader presents a simple on-device menu (D-pad navigation, LCD display) and 
 **Goal**: Let a student configure the badge from any phone or laptop, without needing a pre-existing Wi-Fi network.
 
 ### How it works
-1. User selects **"Configure Device"** from the main menu (or holds a button at boot).
+1. User selects **"Configure Device"** from the main menu (or holds **Button B** during power-on).
 2. The badge starts a **Wi-Fi SoftAP** (SSID: `BYUI_NameBadge`, no password).
-3. A **captive portal** web server runs on the badge (HTTP, port 80).
-4. The phone auto-opens the portal page (captive portal detection), or the user browses to `http://192.168.4.1`.
+3. The badge displays a **QR code** on the LCD pointing to `http://192.168.4.1`.
+4. A **captive portal** HTTP server runs on the badge (port 80) — iOS and Android will auto-redirect when the phone joins the AP; the student can also scan the QR code.
 5. The portal page (served directly from the badge) provides:
    - **Wi-Fi credentials** — SSID + password for the network the badge should join for OTA
    - **Device nickname** — a friendly name stored in NVS (shown on the badge LCD)
@@ -25,11 +61,12 @@ The loader presents a simple on-device menu (D-pad navigation, LCD display) and 
 6. On form submit, settings are written to NVS and the badge reboots to the main menu.
 
 ### Acceptance criteria
-- [ ] SoftAP starts within 3 seconds of entering config mode
-- [ ] Portal page loads on iOS and Android without manual URL entry (captive portal redirect)
-- [ ] All settings persist across power cycles (stored in NVS)
-- [ ] Invalid/empty submissions show an error and do not write to NVS
-- [ ] Pressing the B button cancels and returns to the main menu without saving
+- [ ] SoftAP starts and QR code appears on LCD within 3 seconds
+- [ ] Captive portal auto-redirects on iOS and Android (no manual URL entry)
+- [ ] QR code scannable on the badge LCD from 30 cm away
+- [ ] All settings persist across power cycles (NVS)
+- [ ] Invalid / empty Wi-Fi SSID shows inline error — nothing written to NVS
+- [ ] Button B cancels and returns to main menu without saving
 
 ---
 
@@ -100,12 +137,100 @@ Students in a class may want to start a brand-new experiment from scratch withou
 
 ---
 
+---
+
+## Objective 4 — Bootloader Self-Recovery
+
+**Goal**: Give students and instructors a clear, minimal-friction path to re-install the factory loader if it gets overwritten — without any software installation, and without needing the badge to be in a fully bootable state.
+
+### Why this is needed
+
+The one scenario where durability breaks down: a student connects a USB cable and runs `idf.py flash` (the default full-flash command), which overwrites the factory partition with their own code. After this the badge may boot into something with no loader menu at all.
+
+### Recovery — three tiers
+
+Ordered from "no hardware needed" to "always works even if badge is dead":
+
+---
+
+#### Tier 1 — Automatic Rollback (transparent, no student action)
+
+If a downloaded OTA app fails to boot (crash, watchdog, or invalid image), the ESP-IDF 2nd-stage bootloader detects an unconfirmed app and automatically falls back to the factory partition on the next power cycle.
+
+Apps should call `esp_ota_mark_app_valid_cancel_rollback()` after a successful startup; if they crash before that call, rollback is silent and automatic.
+
+> **Protects against bad OTA app code. Does not protect against `idf.py flash` overwriting factory.**
+
+---
+
+#### Tier 2 — SoftAP Recovery Flash (phone only — no USB, no laptop)
+
+**Trigger**: Hold **Button A + Button B** simultaneously for 3 seconds during power-on.
+
+Detected in the **custom 2nd-stage bootloader** (not in the application), so it works even if the factory partition contains garbage:
+
+1. Custom bootloader samples GPIO38 (A) and GPIO18 (B) immediately after startup.
+2. Both held → bootloader launches a minimal SoftAP + HTTP recovery environment instead of jumping to any app partition.
+3. LCD shows **"Recovery Mode"** and a large **QR code**.
+4. QR code encodes the GitHub Pages recovery URL:
+   `https://watsonlr.github.io/BYUI-Namebadge-OTA/recovery`
+
+From the recovery web page the student has two sub-options:
+
+**Option A — Phone flash (zero hardware needed besides the badge itself):**
+- The badge recovery AP exposes `POST http://192.168.4.1/flash`
+- The recovery web page (running on the phone browser) fetches the latest `factory_loader.bin` from GitHub Pages and POSTs it to the badge
+- Badge verifies SHA-256, writes to the factory partition, reboots
+
+**Option B — USB flash via ESP Web Tools (laptop with Chrome or Edge, no install):**
+- Recovery web page also links to an [ESP Web Tools](https://esphome.github.io/esp-web-tools/) manifest
+- Student connects USB to laptop → click Connect → click Flash → done
+- Uses the browser's built-in WebSerial API — no Python, no drivers, no `idf.py`
+
+> **Why QR code on screen?** It always points to the live GitHub Pages URL where the recovery page and latest binary live. No printed labels to go out of date. URL also printed on the badge back as a fallback.
+
+---
+
+#### Tier 3 — ROM Download Mode (hardware-guaranteed, cannot be blocked by software)
+
+The ESP32-S3 ROM bootloader lives **in chip silicon — it can never be erased or overwritten by any software, ever.**
+
+Procedure:
+1. Hold **BOOT (GPIO0)**, press and release **RESET (EN)**, then release BOOT.
+2. Badge enumerates as a USB CDC device in ROM UART download mode.
+3. Flash using any of:
+   - **ESP Web Tools** (Chrome/Edge) — scan QR on badge label or visit recovery URL
+   - `esptool.py --port COMx write_flash 0x20000 factory_loader.bin`
+   - `idf.py -p COMx flash` from the project checkout
+
+---
+
+### Recovery QR / URL placement
+
+| Location | Format |
+|----------|--------|
+| Badge LCD (Tier 2 mode) | Large QR + `byui.me/badge-recover` |
+| Printed label on badge back | Short URL + BOOT+RST procedure |
+| Class getting-started card | QR + recovery URL |
+
+### Acceptance criteria
+
+- [ ] Custom bootloader detects A+B hold on startup without jumping to any app partition
+- [ ] QR code on LCD encodes correct recovery URL and is scan-readable at 30 cm
+- [ ] Option A: phone POST completes; SHA-256 verified before writing factory partition; badge reboots into restored loader
+- [ ] Option B: `manifest.json` on GitHub Pages always references the latest `factory_loader.bin` with correct SHA-256
+- [ ] Tier 3: ROM download mode reachable via BOOT+RST (hardware — no code change needed)
+- [ ] Recovery page clearly labels all paths and lists required equipment per path
+- [ ] After any recovery path, badge boots normally into the restored loader
+
+---
+
 ## Main Menu Layout (reference)
 
 ```
 ┌─────────────────────────────┐
 │  BYUI eBadge  v1.0          │
-│  [nickname]                 │
+│  My Badge                   │
 ├─────────────────────────────┤
 │  ▶ 1. Download App          │
 │    2. Configure Device      │
@@ -114,17 +239,32 @@ Students in a class may want to start a brand-new experiment from scratch withou
 │  Installed: Game Launcher   │
 │             v2.1.0          │
 └─────────────────────────────┘
-  U/D = navigate   A = select
+    U/D = navigate   A = select
+```
+
+Recovery mode screen (Tier 2):
+
+```
+┌─────────────────────────────┐
+│  !! RECOVERY MODE !!        │
+│                             │
+│  Scan to restore loader:    │
+│                             │
+│  [  QR CODE (large)  ]      │
+│                             │
+│  or: byui.me/badge-recover  │
+└─────────────────────────────┘
 ```
 
 ---
 
 ## Non-Goals (out of scope for v1)
 
-- No peer-to-peer or Bluetooth app transfer
-- No app signing beyond SHA-256 checksum
+- No Bluetooth app transfer
+- No app code-signing beyond SHA-256 checksum (v2 consideration)
 - No multi-user NVS profiles
-- No OTA update of the loader itself (factory partition is intentionally permanent)
+- No OTA self-update of the loader via the normal download menu (factory partition is intentionally fixed; Tier 2 Option A is the deliberate exception)
+- No 5 GHz Wi-Fi (ESP32-S3 is 2.4 GHz only)
 
 ---
 
@@ -132,9 +272,11 @@ Students in a class may want to start a brand-new experiment from scratch withou
 
 | # | Milestone | Objectives |
 |---|-----------|------------|
-| M1 | Hardware bringup | LCD on, buttons read, RGB LED, boot into loader skeleton |
-| M2 | Configuration portal | Obj 1 complete |
-| M3 | OTA catalog | Obj 2 complete |
-| M4 | Canvas mode | Obj 3 complete |
-| M5 | Integration + polish | Full menu, error handling, SHA-256, progress UI |
-| M6 | Catalog repo | GitHub Pages site with initial app set |
+| M1 | Hardware bringup | LCD on, buttons read, RGB LED, loader skeleton boots |
+| M2 | Configuration portal | Obj 1 — SoftAP, captive portal, NVS settings, QR code |
+| M3 | OTA catalog | Obj 2 — manifest fetch, HTTPS download, SHA-256, progress UI |
+| M4 | Canvas mode | Obj 3 — OTA erase, rollback confirmation, USB sub-mode |
+| M5 | Custom bootloader hook | Obj 4 — A+B detection, Tier 2 recovery AP, recovery LCD screen |
+| M6 | GitHub Pages recovery site | Obj 4 — ESP Web Tools manifest, Option A POST endpoint, recovery page |
+| M7 | Integration + polish | All menus connected, full error handling, all acceptance criteria green |
+| M8 | App catalog repo | GitHub Pages site with initial app set (game launcher, etc.) |
