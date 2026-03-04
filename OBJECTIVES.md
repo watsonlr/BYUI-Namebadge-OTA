@@ -258,6 +258,113 @@ Recovery mode screen (Tier 2):
 
 ---
 
+## Cross-Cutting Concern — Hardware Revision Identification
+
+### Problem
+
+The eBadge hardware will evolve across board revisions. Firmware binaries compiled for V3.0 may not be compatible with V3.1 (different peripherals, pin changes, etc.). The bootloader must know which hardware revision it is running on so it can request — and validate — compatible firmware from the catalog.
+
+### Constraints
+
+- **No eFuse burns** during manufacturing (no provisioning step available)
+- **No ADC version resistor** (PCB change required per revision, undesirable)
+- Each ESP32-S3 chip has a **globally unique, factory-programmed 48-bit MAC address** (burned by Espressif into eFuse at chip manufacture — not by the badge assembler) readable via `esp_efuse_mac_get_default()`
+
+### Chosen approach — MAC address registry
+
+The MAC address is used as a stable, unique key. A static `registry.json` file maintained on the same GitHub Pages catalog site maps each badge's MAC to its hardware revision string. The bootloader resolves its own hardware revision at runtime by looking itself up in this file.
+
+#### Runtime flow
+
+```
+Boot → read own MAC (esp_efuse_mac_get_default())
+     → connect Wi-Fi
+     → GET https://<org>.github.io/<catalog>/registry.json
+     → look up MAC in registry
+         found   → hw_rev = "v3.1"
+         not found → hw_rev = "unknown"; show enrollment prompt on LCD
+     → GET manifest.json
+     → filter app list to entries compatible with hw_rev
+     → display filtered list to student
+```
+
+#### `registry.json` format
+
+```json
+{
+  "schema_version": 1,
+  "default_hw_rev": "v3.0",
+  "badges": [
+    { "mac": "AA:BB:CC:DD:EE:FF", "hw_rev": "v3.0", "label": "Batch 2025A" },
+    { "mac": "AA:BB:CC:DD:EE:00", "hw_rev": "v3.1", "label": "Batch 2026A" }
+  ]
+}
+```
+
+`default_hw_rev` is used when a MAC is not in the list (see enrollment below).
+
+#### Updated `manifest.json` format
+
+Each app entry gains a `hw_rev` compatibility field:
+
+```json
+{
+  "schema_version": 2,
+  "apps": [
+    {
+      "name": "Game Launcher",
+      "version": "2.1.0",
+      "description": "Browse and launch arcade games",
+      "hw_rev": ["v3.0", "v3.1"],
+      "url": "https://.../apps/launcher-v3.bin",
+      "sha256": "<hex>",
+      "size_bytes": 524288
+    },
+    {
+      "name": "Game Launcher",
+      "version": "2.2.0",
+      "description": "Browse and launch arcade games (v3.1 hardware)",
+      "hw_rev": ["v3.1"],
+      "url": "https://.../apps/launcher-v31.bin",
+      "sha256": "<hex>",
+      "size_bytes": 531000
+    }
+  ]
+}
+```
+
+The badge filters the app list client-side to only show entries where its `hw_rev` appears in the app's `hw_rev` array.
+
+### Badge enrollment (MAC not in registry)
+
+When a badge's MAC is not found in `registry.json`:
+
+1. The badge falls back to `default_hw_rev` and continues normally.
+2. The LCD home screen shows a subtle indicator: **"⚠ Board not enrolled"**.
+3. The configuration portal page (Obj 1) displays the badge's MAC address so the instructor can copy it into `registry.json` via a pull request or the GitHub web editor.
+4. Once the registry is updated and re-fetched, the indicator clears.
+
+> The MAC is also displayed on the "About" screen (long-press A on home menu) for easy identification without entering config mode.
+
+### MAC as device identity (secondary benefit)
+
+The MAC can serve double-duty beyond hw_rev lookup:
+
+- **Attendance / inventory**: instructor can cross-reference MAC → student name in a separate class roster
+- **Per-device config**: future `registry.json` extensions could carry per-badge flags (e.g. `"beta": true` to show pre-release apps)
+- **Support**: when a student reports a problem, the MAC on-screen uniquely identifies the exact unit
+
+### Acceptance criteria
+
+- [ ] `esp_efuse_mac_get_default()` called once at boot; MAC stored in RAM for the session lifetime
+- [ ] MAC displayed as `AA:BB:CC:DD:EE:FF` on config portal page and About screen
+- [ ] `registry.json` fetched before (or alongside) `manifest.json`; a fetch failure falls back to `default_hw_rev` with a visible warning
+- [ ] App list silently filters to `hw_rev`-compatible entries only; incompatible entries are never shown
+- [ ] "Board not enrolled" indicator shown when MAC absent from registry; clears after successful enrollment
+- [ ] `registry.json` and `manifest.json` schema versions checked; mismatched schema logs a warning and falls back gracefully
+
+---
+
 ## Non-Goals (out of scope for v1)
 
 - No Bluetooth app transfer
@@ -265,6 +372,8 @@ Recovery mode screen (Tier 2):
 - No multi-user NVS profiles
 - No OTA self-update of the loader via the normal download menu (factory partition is intentionally fixed; Tier 2 Option A is the deliberate exception)
 - No 5 GHz Wi-Fi (ESP32-S3 is 2.4 GHz only)
+- No eFuse burning during manufacturing
+- No hardware version resistor / ADC strapping; MAC registry is the sole hw_rev mechanism
 
 ---
 
@@ -273,10 +382,11 @@ Recovery mode screen (Tier 2):
 | # | Milestone | Objectives |
 |---|-----------|------------|
 | M1 | Hardware bringup | LCD on, buttons read, RGB LED, loader skeleton boots |
-| M2 | Configuration portal | Obj 1 — SoftAP, captive portal, NVS settings, QR code |
+| M2 | Configuration portal | Obj 1 — SoftAP, captive portal, NVS settings, QR code, MAC display |
 | M3 | OTA catalog | Obj 2 — manifest fetch, HTTPS download, SHA-256, progress UI |
-| M4 | Canvas mode | Obj 3 — OTA erase, rollback confirmation, USB sub-mode |
-| M5 | Custom bootloader hook | Obj 4 — A+B detection, Tier 2 recovery AP, recovery LCD screen |
-| M6 | GitHub Pages recovery site | Obj 4 — ESP Web Tools manifest, Option A POST endpoint, recovery page |
-| M7 | Integration + polish | All menus connected, full error handling, all acceptance criteria green |
-| M8 | App catalog repo | GitHub Pages site with initial app set (game launcher, etc.) |
+| M4 | MAC registry + hw_rev filtering | Cross-cutting — registry.json fetch, hw_rev lookup, filtered app list, enrollment indicator |
+| M5 | Canvas mode | Obj 3 — OTA erase, rollback confirmation, USB sub-mode |
+| M6 | Custom bootloader hook | Obj 4 — A+B detection, Tier 2 recovery AP, recovery LCD screen |
+| M7 | GitHub Pages recovery site | Obj 4 — ESP Web Tools manifest, Option A POST endpoint, recovery page |
+| M8 | Integration + polish | All menus connected, full error handling, all acceptance criteria green |
+| M9 | App catalog + registry repo | GitHub Pages site: manifest.json, registry.json, initial app set |
