@@ -1,0 +1,51 @@
+# BYUI eBadge V3.0 — Default Configuration
+# Target: ESP32-S3-Mini-1-N8 (8 MB flash, no PSRAM)
+#
+# These settings apply when sdkconfig does not exist.
+# Run `idf.py menuconfig` to customise further.
+
+# ─── Target ──────────────────────────────────────────────────────
+CONFIG_IDF_TARGET="esp32s3"
+
+# ─── Flash ───────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# ─── Partition table ─────────────────────────────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ─── PSRAM (N8 has no PSRAM) ─────────────────────────────────────
+CONFIG_SPIRAM=n
+
+# ─── USB console (ESP32-S3 native USB-JTAG) ──────────────────────
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ─── Compiler ────────────────────────────────────────────────────
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# ─── System ──────────────────────────────────────────────────────
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_FREERTOS_HZ=1000
+
+# ─── Logging ─────────────────────────────────────────────────────
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+# ─── Wi-Fi ───────────────────────────────────────────────────────
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+
+# ─── LWIP ────────────────────────────────────────────────────────
+CONFIG_LWIP_MAX_SOCKETS=10
+
+# ─── HTTP / TLS ──────────────────────────────────────────────────
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
