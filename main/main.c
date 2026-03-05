@@ -29,6 +29,7 @@
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "splash_screen.h"
 
 /* ── GPIO definitions ───────────────────────────────────────────── */
 
@@ -57,39 +58,11 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "BYUI eBadge starter app booting...");
 
-    /* Initialise NVS (required by Wi-Fi and other drivers) */
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+    splash_screen_run();
 
-    /* Configure GPIOs */
-    gpio_init();
-
-    ESP_LOGI(TAG, "Hardware initialised. Starting main loop.");
-
-    /* ── Your application code starts here ─────────────────────── */
-
+    ESP_LOGI(TAG, "Splash done — idling.");
     while (1) {
-        /* Blink green LED three times on startup */
-        blink_rgb(3, 200);
-
-        /* Read button states and log them */
-        bool btn_a = (gpio_get_level(BTN_A_GPIO) == 0);
-        bool btn_b = (gpio_get_level(BTN_B_GPIO) == 0);
-        bool btn_up    = (gpio_get_level(BTN_UP_GPIO) == 0);
-        bool btn_down  = (gpio_get_level(BTN_DOWN_GPIO) == 0);
-        bool btn_left  = (gpio_get_level(BTN_LEFT_GPIO) == 0);
-        bool btn_right = (gpio_get_level(BTN_RIGHT_GPIO) == 0);
-
-        if (btn_a || btn_b || btn_up || btn_down || btn_left || btn_right) {
-            ESP_LOGI(TAG, "Buttons: A=%d B=%d U=%d D=%d L=%d R=%d",
-                     btn_a, btn_b, btn_up, btn_down, btn_left, btn_right);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(portMAX_DELAY);
     }
 }
 

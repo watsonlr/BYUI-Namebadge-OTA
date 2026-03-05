@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
     INCLUDE_DIRS "."
     REQUIRES
+        splash_screen
         driver
         nvs_flash
         esp_wifi
