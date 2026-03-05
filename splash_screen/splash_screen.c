@@ -177,13 +177,9 @@ static void ili9341_init_regs(void)
     disp_cmd(0xC7);                         /* VCOM control 2 */
     disp_data((uint8_t[]){0x86}, 1);
 
-    /*
-     * MADCTL — landscape 320×240, BGR colour filter.
-     * MV=1 (row/col swap), MX=1 (mirror X), BGR=1 → 0x68.
-     * If the image appears mirrored or rotated, try 0x28, 0x48, 0xA8, 0xE8.
-     */
+    /* MADCTL — MV=1 → 0x20. */
     disp_cmd(0x36);
-    disp_data((uint8_t[]){0x68}, 1);
+    disp_data((uint8_t[]){0x20}, 1);
 
     disp_cmd(0x3A);                         /* Pixel format: 16-bit */
     disp_data((uint8_t[]){0x55}, 1);

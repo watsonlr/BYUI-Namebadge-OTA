@@ -18,10 +18,9 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
-# ─── PSRAM (2 MB octal PSRAM, AP_3v3) ────────────────────────────
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
+# ─── PSRAM ───────────────────────────────────────────────────────
+# Disabled: app fits in internal RAM; PSRAM init crashes at boot
+# CONFIG_SPIRAM is not set
 
 # ─── Console via UART0 → CP2102N (COM8) ──────────────────────────
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
