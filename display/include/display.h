@@ -2,8 +2,16 @@
  * @file display.h
  * @brief ILI9341 TFT display driver — SPI2, landscape 320×240.
  *
- * Provides display initialisation, fill, and text rendering using
- * a built-in 8×8 bitmap font with configurable integer scaling.
+ * Provides display initialisation, fill, and text rendering.
+ * Two built-in 8×8 bitmap fonts are available:
+ *   DISPLAY_FONT_MONO  — classic monospace (original)
+ *   DISPLAY_FONT_SANS  — clean sans-serif
+ *
+ * Quick usage:
+ *   display_text_ctx_t ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+ *                                        DISPLAY_COLOR_WHITE,
+ *                                        DISPLAY_COLOR_BLACK);
+ *   display_print(&ctx, 10, 10, "Hello!");
  */
 
 #pragma once
@@ -35,11 +43,35 @@ extern "C" {
 #define DISPLAY_COLOR_YELLOW  DISPLAY_RGB565(255, 255,   0)
 #define DISPLAY_COLOR_CYAN    DISPLAY_RGB565(  0, 255, 255)
 
+/* ── Font selector ───────────────────────────────────────────────── */
+typedef enum {
+    DISPLAY_FONT_MONO = 0,  /**< Classic monospace (8×8, LSB-left) */
+    DISPLAY_FONT_SANS = 1,  /**< Clean sans-serif  (8×8, LSB-left) */
+} display_font_t;
+
+/* ── Text rendering context ──────────────────────────────────────── */
+typedef struct {
+    display_font_t font;   /**< Typeface selection */
+    int            scale;  /**< Integer pixel scale (1=8px, 2=16px, …) */
+    uint16_t       fg;     /**< Foreground RGB565 colour */
+    uint16_t       bg;     /**< Background RGB565 colour */
+} display_text_ctx_t;
+
+/** Convenience initialiser macro. */
+#define DISPLAY_CTX(font_, scale_, fg_, bg_) \
+    ((display_text_ctx_t){ (font_), (scale_), (fg_), (bg_) })
+
 /**
  * @brief Initialise SPI2 bus and ILI9341 display.
  * Must be called once before any other display function.
  */
 void display_init(void);
+
+/**
+ * @brief Send a raw MADCTL value (0x36) to change scan direction / rotation.
+ * @param madctl  e.g. 0x00, 0x60, 0xC0, 0xA0, 0x20, 0xE0 …
+ */
+void display_set_madctl(uint8_t madctl);
 
 /**
  * @brief Fill the entire screen with a solid colour.
@@ -72,6 +104,19 @@ void display_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg, int scale
  */
 void display_draw_string(int x, int y, const char *str,
                          uint16_t fg, uint16_t bg, int scale);
+
+/**
+ * @brief Print a NUL-terminated string using a text context.
+ *
+ * This is the preferred high-level call. It respects the font, scale,
+ * foreground, and background colour stored in @p ctx.
+ *
+ * @param ctx  Pointer to a display_text_ctx_t describing font/colours/scale.
+ * @param x    Left edge in pixels.
+ * @param y    Top edge in pixels.
+ * @param str  NUL-terminated ASCII string.
+ */
+void display_print(const display_text_ctx_t *ctx, int x, int y, const char *str);
 
 #ifdef __cplusplus
 }

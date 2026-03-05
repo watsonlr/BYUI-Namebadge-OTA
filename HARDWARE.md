@@ -80,9 +80,10 @@
 | MOSI (SPI2) | 11 |
 | MISO (SPI2) | 10 |
 
-- Resolution: 240 × 320 pixels
-- Color format: RGB565 (16-bit), little-endian byte order
-  - Send as `{color & 0xFF, color >> 8}` (low byte first)
+- Resolution: 240 × 320 pixels (native portrait), mounted landscape with FPC connector on the left
+- Orientation: MADCTL register `0x36` = `0x40` (MX bit only) — produces correct landscape orientation with the physical FPC-left mounting
+- Display inversion: send `0x21` (INVON) during init — this panel powers up inverted by default; INVON is required for correct colours
+- Color format: RGB565 (16-bit), big-endian byte order (high byte first) over SPI; confirmed working: red `0xF800`, green `0x07E0`, blue `0x001F`
 - SPI clock: up to 40 MHz, Mode 0 (CPOL=0, CPHA=0), MSB first
 - **SPI2 bus is shared with SD card; manage CS lines carefully**
 
