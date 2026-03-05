@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS        "main.c"
     INCLUDE_DIRS "."
-    REQUIRES    splash_screen driver
+    REQUIRES    display
 )

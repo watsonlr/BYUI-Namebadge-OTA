@@ -54,7 +54,7 @@ Total used: ~4 MB of 8 MB flash
 If you add OTA capability to your application:
 
 ```
-ESP32 app_main()
+ESP32-S3 app_main()
       │
       ├─ Connect to Wi-Fi
       │

@@ -19,7 +19,9 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
 # ─── PSRAM ───────────────────────────────────────────────────────
-# Disabled: app fits in internal RAM; PSRAM init crashes at boot
+# Disabled: octal PSRAM init crashes at boot (PSRAM ID read error 0x00000000).
+# The chip reports N4R2 but the PSRAM does not respond — may require a specific
+# board bring-up sequence or the PSRAM is not populated on this unit.
 # CONFIG_SPIRAM is not set
 
 # ─── Console via UART0 → CP2102N (COM8) ──────────────────────────
