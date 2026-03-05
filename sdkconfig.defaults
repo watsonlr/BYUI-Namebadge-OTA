@@ -1,5 +1,5 @@
 # BYUI eBadge V3.0 — Default Configuration
-# Target: ESP32-S3-Mini-1-N8 (8 MB flash, no PSRAM)
+# Target: ESP32-S3 (QFN56) — 4 MB embedded flash (XMC), 2 MB octal PSRAM
 #
 # These settings apply when sdkconfig does not exist.
 # Run `idf.py menuconfig` to customise further.
@@ -8,8 +8,8 @@
 CONFIG_IDF_TARGET="esp32s3"
 
 # ─── Flash ───────────────────────────────────────────────────────
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
@@ -18,11 +18,13 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
-# ─── PSRAM (N8 has no PSRAM) ─────────────────────────────────────
-CONFIG_SPIRAM=n
+# ─── PSRAM (2 MB octal PSRAM, AP_3v3) ────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
 
-# ─── USB console (ESP32-S3 native USB-JTAG) ──────────────────────
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# ─── Console via UART0 → CP2102N (COM8) ──────────────────────────
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # ─── Compiler ────────────────────────────────────────────────────

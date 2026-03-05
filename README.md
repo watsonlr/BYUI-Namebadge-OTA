@@ -12,9 +12,9 @@ See [OBJECTIVES.md](OBJECTIVES.md) for the full project specification and milest
 
 | Component | Details |
 |-----------|---------|
-| MCU | ESP32-S3-Mini-1-N8 (dual-core Xtensa, 240 MHz) |
-| Flash | 8 MB embedded |
-| RAM | 512 KB SRAM |
+| MCU | ESP32-S3 QFN56 (dual-core Xtensa LX7, 240 MHz) |
+| Flash | 4 MB embedded (XMC) |
+| RAM | 512 KB SRAM + 2 MB octal PSRAM |
 | Display | ILI9341 2.4" TFT LCD, 240×320, SPI2 |
 | Controls | D-pad (4 buttons) + A + B buttons |
 | LEDs | RGB LED (GPIO 4/5/6) + WS2813B addressable strip (GPIO 7) |
@@ -91,6 +91,8 @@ idf.py menuconfig
 | ota_0 | app/ota_0 | 0x110000 | 960 KB | OTA slot 0 |
 | ota_1 | app/ota_1 | 0x200000 | 960 KB | OTA slot 1 |
 | ota_2 | app/ota_2 | 0x2F0000 | 960 KB | OTA slot 2 |
+
+Total layout: 3.875 MB — fits within the 4 MB flash with 128 KB spare.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for boot flow diagrams.
 

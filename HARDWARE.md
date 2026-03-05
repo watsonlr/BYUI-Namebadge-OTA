@@ -4,14 +4,15 @@
 
 | Item | Spec |
 |------|------|
-| MCU | ESP32-S3-Mini-1-N8 |
+| MCU | ESP32-S3 QFN56 (revision v0.2) |
 | Architecture | Xtensa dual-core LX7, 240 MHz |
-| Flash | 8 MB embedded (no external PSRAM on N8 variant) |
+| Flash | 4 MB embedded (XMC) |
+| PSRAM | 2 MB octal PSRAM (AP_3v3) |
 | RAM | 512 KB SRAM |
 | Wi-Fi | 2.4 GHz 802.11 b/g/n |
 | Bluetooth | BLE 5.0 |
 
-> **Note**: If you have the N4R2 module (4 MB flash + 2 MB PSRAM), GPIO26 is reserved for PSRAM — do not use it.
+> **Note**: GPIO26 is reserved for the octal PSRAM interface — do not use it.
 
 ## BYUI eBadge V3.0 — Full Pinout
 

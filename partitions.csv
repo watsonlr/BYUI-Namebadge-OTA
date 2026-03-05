@@ -1,4 +1,5 @@
-# BYUI eBadge V3.0 — ESP32-S3 Partition Table (8 MB Flash)
+# BYUI eBadge V3.0 — ESP32-S3 Partition Table (4 MB Flash)
+# Layout occupies 0x000000–0x3E0000 (3.875 MB), leaving 128 KB spare at top.
 # Adjust sizes to fit your application. OTA slots require equal sizes.
 # Name,     Type, SubType,  Offset,   Size,     Flags
 nvs,        data, nvs,      0x9000,   0x6000,
