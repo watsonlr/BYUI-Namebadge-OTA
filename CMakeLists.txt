@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Target chip — must be set before project.cmake is included
-set(IDF_TARGET esp32s3)
+# Declare target before including ESP-IDF so it cannot be overridden by stale
+# cmake cache entries or IDE extensions that default to a different chip.
+set(IDF_TARGET "esp32s3")
 
 # Use the custom partition table from the project root
 set(PARTITION_CSV_PATH "${CMAKE_SOURCE_DIR}/partitions.csv")
 
-set(EXTRA_COMPONENT_DIRS "splash_screen" "display")
+set(EXTRA_COMPONENT_DIRS "splash_screen" "display" "wifi_config" "portal_mode")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

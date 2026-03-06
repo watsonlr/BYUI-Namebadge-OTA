@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -117,6 +118,20 @@ void display_draw_string(int x, int y, const char *str,
  * @param str  NUL-terminated ASCII string.
  */
 void display_print(const display_text_ctx_t *ctx, int x, int y, const char *str);
+
+/**
+ * @brief Encode @p text as a QR code and draw it centred at (@p cx, @p cy).
+ *
+ * @param cx          Centre x (pixels).
+ * @param cy          Centre y (pixels).
+ * @param text        NUL-terminated string to encode (byte mode, ECC M).
+ * @param module_px   Pixels per QR module (3–4 recommended for 320×240).
+ * @param fg          Dark-module colour (RGB565).
+ * @param bg          Light-module / background colour (RGB565).
+ * @return true if encoding succeeded and the code was drawn.
+ */
+bool display_draw_qr(int cx, int cy, const char *text,
+                     int module_px, uint16_t fg, uint16_t bg);
 
 #ifdef __cplusplus
 }

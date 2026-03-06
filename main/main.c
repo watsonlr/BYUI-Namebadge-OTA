@@ -1,9 +1,20 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_log.h"
+#include "esp_psram.h"
 #include "display.h"
+
+static const char *TAG = "main";
 
 void app_main(void)
 {
+    size_t psram_size = esp_psram_get_size();
+    if (psram_size > 0) {
+        ESP_LOGI(TAG, "PSRAM: %u bytes available", (unsigned)psram_size);
+    } else {
+        ESP_LOGW(TAG, "PSRAM: not available");
+    }
+
     display_init();
     display_fill(DISPLAY_COLOR_BLACK);
 
