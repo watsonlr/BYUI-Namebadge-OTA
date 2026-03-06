@@ -19,15 +19,21 @@
 
 /* ── Layout constants (320×240 landscape) ───────────────────────── */
 
-/* QR code: version 3 for "http://192.168.4.1/" ≈ 29 modules.
- * At 6 px/module → 174 px square, fits comfortably.             */
-#define QR_MODULE_PX     6
+/* QR code: "WIFI:T:nopass;S:BYUI_NameBadge;;" — 33 bytes — version 4 (33 modules).
+ * iOS/Android camera app sees this and offers "Join network BYUI_NameBadge" in
+ * one tap; the captive-portal popup then fires automatically.
+ * At 4 px/module + 4-module quiet zone each side (8*4=32 px border)
+ * → total footprint = (33+8)*4 = 164 px square.
+ * Centre at (160, 82) → y spans 0..164, leaves 76 px for text.    */
+#define WIFI_QR_PAYLOAD  "WIFI:T:nopass;S:BYUI_NameBadge;;"
+#define QR_MODULE_PX     4
 #define QR_CX            (DISPLAY_W / 2)     /* 160 */
-#define QR_CY            110                 /* vertical centre of QR */
+#define QR_CY            82                  /* vertical centre of QR+quiet */
 
-/* Text rows below QR */
-#define TEXT_Y_SSID      210
-#define TEXT_Y_URL       224
+/* Text rows below QR (QR bottom edge = 82 + 82 = 164) */
+#define TEXT_Y_LINE1     174
+#define TEXT_Y_LINE2     192
+#define TEXT_Y_LINE3     212
 #define TEXT_SCALE       1                   /* 8 px tall, scale 1 */
 
 bool portal_mode_run(int timeout_s)
@@ -38,13 +44,13 @@ bool portal_mode_run(int timeout_s)
         return false;
     }
     const char *url = wifi_config_url();  /* "http://192.168.4.1/" */
-    ESP_LOGI(TAG, "Portal active — connect to SSID \"BADGE-CONFIG\", open %s", url);
+    ESP_LOGI(TAG, "Portal active — connect to SSID \"BYUI_NameBadge\", open %s", url);
 
     /* ── Draw UI ── */
     display_fill(DISPLAY_COLOR_WHITE);
 
-    /* QR code (dark on white) */
-    display_draw_qr(QR_CX, QR_CY, url,
+    /* WiFi-join QR: iOS/Android camera auto-prompts "Join BYUI_NameBadge" */
+    display_draw_qr(QR_CX, QR_CY, WIFI_QR_PAYLOAD,
                     QR_MODULE_PX,
                     DISPLAY_COLOR_BLACK,
                     DISPLAY_COLOR_WHITE);
@@ -53,8 +59,9 @@ bool portal_mode_run(int timeout_s)
     display_text_ctx_t ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, TEXT_SCALE,
                                          DISPLAY_COLOR_BLACK,
                                          DISPLAY_COLOR_WHITE);
-    display_print(&ctx,  4, TEXT_Y_SSID, "WiFi: BYUI_NameBadge  (open)");
-    display_print(&ctx, 20, TEXT_Y_URL,  "http://192.168.4.1/");
+    display_print(&ctx,  4, TEXT_Y_LINE1, "1. Scan QR to join WiFi");
+    display_print(&ctx,  4, TEXT_Y_LINE2, "2. Setup page opens automatically");
+    display_print(&ctx,  4, TEXT_Y_LINE3, "   Or visit: 192.168.4.1");
 
     /* ── Poll until done or timeout ── */
     int elapsed = 0;

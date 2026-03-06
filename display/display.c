@@ -531,41 +531,89 @@ bool display_draw_qr(int cx, int cy, const char *text,
         return false;
     }
 
-    int side  = qr_size * module_px;
-    int x0    = cx - side / 2;
-    int y0    = cy - side / 2;
+    /* QR spec requires a 4-module quiet zone on every side. */
+    const int QUIET = 4;
+    int qz_px     = QUIET * module_px;
+    int total_px  = (qr_size + 2 * QUIET) * module_px;
 
-    /* Draw row by row */
+    int x0 = cx - total_px / 2;   /* top-left corner of quiet zone */
+    int y0 = cy - total_px / 2;
+
     static uint8_t row_buf[DISPLAY_W * 2];
+    uint8_t bg_hi = (uint8_t)(bg >> 8);
+    uint8_t bg_lo = (uint8_t)(bg & 0xFF);
+
+    /* Clipped screen x-range (same for every row) */
+    int sx0    = (x0 < 0) ? 0 : x0;
+    int sx1    = (x0 + total_px - 1 < DISPLAY_W) ? x0 + total_px - 1 : DISPLAY_W - 1;
+    int skip   = (x0 < 0) ? (-x0 * 2) : 0;
+    int nbytes = (sx1 - sx0 + 1) * 2;
+
+    /* Build a solid-background row (used for quiet-zone rows) */
+    int full_px = (total_px <= DISPLAY_W) ? total_px : DISPLAY_W;
+    for (int i = 0; i < full_px * 2;) {
+        row_buf[i++] = bg_hi;
+        row_buf[i++] = bg_lo;
+    }
+
+    /* Send a pre-built row to one screen scanline */
+#define SEND_ROW(sy)  do {                                          \
+        int _sy = (sy);                                             \
+        if (_sy >= 0 && _sy < DISPLAY_H && nbytes > 0) {           \
+            set_window((uint16_t)sx0, (uint16_t)_sy,               \
+                       (uint16_t)sx1, (uint16_t)_sy);              \
+            write_pixels(row_buf + skip, nbytes);                  \
+        }                                                           \
+    } while (0)
+
+    /* Top quiet zone */
+    for (int py = 0; py < qz_px; py++) {
+        SEND_ROW(y0 + py);
+    }
+
+    /* Data rows with left/right quiet margins */
+    int data_y0 = y0 + qz_px;
     for (int row = 0; row < qr_size; row++) {
-        /* Build one module-row worth of pixels */
-        int px_count = qr_size * module_px;
-        if (px_count > DISPLAY_W) px_count = DISPLAY_W;
         int bi = 0;
-        for (int col = 0; col < qr_size && bi / 2 < DISPLAY_W; col++) {
+        /* Left quiet zone */
+        for (int i = 0; i < qz_px; i++) {
+            row_buf[bi++] = bg_hi;
+            row_buf[bi++] = bg_lo;
+        }
+        /* QR symbol modules */
+        for (int col = 0; col < qr_size; col++) {
             bool dark      = qr_get_module(qr_buf, qr_size, col, row);
             uint16_t color = dark ? fg : bg;
             uint8_t hi     = (uint8_t)(color >> 8);
             uint8_t lo     = (uint8_t)(color & 0xFF);
-            for (int p = 0; p < module_px && bi / 2 < DISPLAY_W; p++) {
+            for (int p = 0; p < module_px; p++) {
+                if (bi / 2 >= DISPLAY_W) break;
                 row_buf[bi++] = hi;
                 row_buf[bi++] = lo;
             }
         }
-        /* Repeat the module-row module_px times vertically */
+        /* Right quiet zone */
+        for (int i = 0; i < qz_px && bi / 2 < DISPLAY_W; i++) {
+            row_buf[bi++] = bg_hi;
+            row_buf[bi++] = bg_lo;
+        }
+
+        /* Repeat this row module_px scanlines vertically */
         for (int py = 0; py < module_px; py++) {
-            int screen_y = y0 + row * module_px + py;
-            if (screen_y < 0 || screen_y >= DISPLAY_H) continue;
-            int screen_x0 = x0 < 0 ? 0 : x0;
-            int screen_x1 = x0 + side - 1;
-            if (screen_x1 >= DISPLAY_W) screen_x1 = DISPLAY_W - 1;
-            set_window((uint16_t)screen_x0, (uint16_t)screen_y,
-                       (uint16_t)screen_x1, (uint16_t)screen_y);
-            /* Offset into row_buf if x0 < 0 */
-            int skip = (x0 < 0) ? (-x0 * 2) : 0;
-            int nbytes = (screen_x1 - screen_x0 + 1) * 2;
-            write_pixels(row_buf + skip, nbytes);
+            SEND_ROW(data_y0 + row * module_px + py);
         }
     }
+
+    /* Bottom quiet zone — rebuild bg row (data rows overwrote it) */
+    for (int i = 0; i < full_px * 2;) {
+        row_buf[i++] = bg_hi;
+        row_buf[i++] = bg_lo;
+    }
+    int bot_y0 = data_y0 + qr_size * module_px;
+    for (int py = 0; py < qz_px; py++) {
+        SEND_ROW(bot_y0 + py);
+    }
+
+#undef SEND_ROW
     return true;
 }

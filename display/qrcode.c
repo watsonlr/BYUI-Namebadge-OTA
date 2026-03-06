@@ -209,16 +209,32 @@ static const uint16_t FORMAT_BITS_M[8] = {
 static void draw_format(uint8_t *grid, uint8_t *fm, int sz, int mask_id)
 {
     uint16_t fmt = FORMAT_BITS_M[mask_id];
-    /* Horizontal: row 8, cols 0-5, 7, 8 */
-    static const int HX[] = {0,1,2,3,4,5,7,8,8,8,8,8,8,8,8};
-    static const int HY[] = {8,8,8,8,8,8,8,8,7,5,4,3,2,1,0};
+
+    /* Primary copy: around top-left finder.
+     * Bits 14(MSB)..0(LSB) placed at the positions below (per ISO 18004). */
+    static const int PX[] = {0,1,2,3,4,5,7,8, 8,8,8,8,8,8,8};
+    static const int PY[] = {8,8,8,8,8,8,8,8, 7,5,4,3,2,1,0};
+
     for (int i = 0; i < 15; i++) {
         bool bit = (fmt >> (14 - i)) & 1;
-        grid_set(grid, sz, HX[i], HY[i], bit);
-        mask_set(fm, sz, HX[i], HY[i]);
-        /* Vertical copy */
-        grid_set(grid, sz, HY[i], HX[i], bit);
-        mask_set(fm, sz, HY[i], HX[i]);
+
+        /* Primary (top-left area) */
+        grid_set(grid, sz, PX[i], PY[i], bit);
+        mask_set(fm,   sz, PX[i], PY[i]);
+
+        /* Secondary copy (ISO 18004 Table 25):
+         *  bits 0-6  → column 8, rows (sz-1) down to (sz-7)  [near BL finder]
+         *  bits 7-14 → row 8,    cols (sz-8)  up  to (sz-1)  [near TR finder] */
+        int sx, sy;
+        if (i < 7) {
+            sx = 8;
+            sy = sz - 1 - i;
+        } else {
+            sx = sz - 8 + (i - 7);
+            sy = 8;
+        }
+        grid_set(grid, sz, sx, sy, bit);
+        mask_set(fm,   sz, sx, sy);
     }
 }
 
@@ -358,19 +374,23 @@ bool qr_encode(const char *text, uint8_t *qr_buf, int *out_size)
         for (int j = 0; j < ALIGN_COUNT[version]; j++) {
             int cx = ALIGN_POS[version][i];
             int cy = ALIGN_POS[version][j];
-            /* Skip if overlaps finder */
+            /* Skip if centre is on timing strip row/col (always 6) */
+            if (cx == 6 || cy == 6) continue;
+            /* Skip if centre overlaps a finder pattern */
             if (mask_get(fm, sz, cx, cy)) continue;
             draw_alignment(grid, fm, sz, cx, cy);
         }
     }
 
-    /* Reserve format info areas (drawn properly later per mask) */
-    /* Mark them in fm so data placement skips them */
-    static const int FX[] = {0,1,2,3,4,5,7,8,8,8,8,8,8,8,8};
-    static const int FY[] = {8,8,8,8,8,8,8,8,7,5,4,3,2,1,0};
+    /* Reserve format info areas so data placement skips them.
+     * Must match the exact positions written by draw_format().        */
+    static const int FX[] = {0,1,2,3,4,5,7,8, 8,8,8,8,8,8,8};
+    static const int FY[] = {8,8,8,8,8,8,8,8, 7,5,4,3,2,1,0};
     for (int i = 0; i < 15; i++) {
-        mask_set(fm, sz, FX[i], FY[i]);
-        mask_set(fm, sz, FY[i], FX[i]);
+        mask_set(fm, sz, FX[i], FY[i]);          /* primary  */
+        /* secondary */
+        if (i < 7) mask_set(fm, sz, 8, sz - 1 - i);
+        else       mask_set(fm, sz, sz - 8 + (i - 7), 8);
     }
 
     /* ── Build data codewords ── */
