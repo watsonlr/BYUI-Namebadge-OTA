@@ -41,10 +41,12 @@
 
 #define HDR_Y1         2
 #define HDR_Y2         20
-#define TEXT_Y1        206
-#define TEXT_Y2        224
+#define TEXT_Y1        188
+#define TEXT_Y2        206
 #define HDR_SCALE      2    /* scale 2 = 16px — matches footer size */
 #define TEXT_SCALE     2    /* scale 2 = 16px */
+/* Coloured bar: covers top of screen down to 4px below last header line */
+#define HDR_BAR_H      (HDR_Y2 + HDR_SCALE * DISPLAY_FONT_H + 4)  /* = 40 */
 
 
 /* Centre a string horizontally for a given font scale. */
@@ -63,15 +65,18 @@ static void draw_portal_screen(const char *qr_payload,
 {
     display_fill(DISPLAY_COLOR_WHITE);
 
+    /* Coloured bar behind the header lines */
+    display_fill_rect(0, 0, DISPLAY_W, HDR_BAR_H, hdr_color);
+
     display_draw_qr(QR_CX, QR_CY, qr_payload,
                     QR_MODULE_PX,
                     DISPLAY_COLOR_BLACK,
                     DISPLAY_COLOR_WHITE);
 
-    /* Header lines — caller-specified colour, scale 1, horizontally centred */
+    /* Header lines — white text on the coloured bar */
     display_text_ctx_t hctx = DISPLAY_CTX(DISPLAY_FONT_SANS, HDR_SCALE,
-                                           hdr_color,
-                                           DISPLAY_COLOR_WHITE);
+                                           DISPLAY_COLOR_WHITE,
+                                           hdr_color);
     if (hdr1) display_print(&hctx, centre_x(hdr1, HDR_SCALE),  HDR_Y1, hdr1);
     if (hdr2) display_print(&hctx, centre_x(hdr2, HDR_SCALE),  HDR_Y2, hdr2);
 
@@ -101,7 +106,7 @@ bool portal_mode_run(int timeout_s)
     /* ── Phase 1: invite user to scan and join WiFi ── */
     draw_portal_screen(wifi_qr, DISPLAY_COLOR_BLUE,
                        "Welcome to your",
-                       "NameBadge!",
+                       "ECEN NameBadge!",
                        "Scan to Join Your",
                        "Board's WiFi");
 
@@ -120,10 +125,10 @@ bool portal_mode_run(int timeout_s)
 
             /* Build URL QR string (just the bare URL) */
             draw_portal_screen(url, DISPLAY_COLOR_GREEN,
-                               NULL,
                                "Device Connected!",
+                               NULL,
                                "Scan to open browser",
-                               "If not joined already");
+                               "If not open yet.");
         }
 
         if (timeout_s > 0 && elapsed >= timeout_s * 1000) {

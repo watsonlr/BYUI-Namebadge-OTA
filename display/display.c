@@ -405,6 +405,23 @@ void display_fill(uint16_t color)
     }
 }
 
+void display_fill_rect(int x, int y, int w, int h, uint16_t color)
+{
+    /* Clamp to screen bounds. */
+    if (x < 0)              { w += x; x = 0; }
+    if (y < 0)              { h += y; y = 0; }
+    if (x + w > DISPLAY_W)  w = DISPLAY_W - x;
+    if (y + h > DISPLAY_H)  h = DISPLAY_H - y;
+    if (w <= 0 || h <= 0)   return;
+
+    static uint8_t row_buf[DISPLAY_W * 2];
+    for (int i = 0; i < w; i++) pack_pixel(&row_buf[i * 2], color);
+
+    set_window((uint16_t)x, (uint16_t)y,
+               (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+    for (int row = 0; row < h; row++) write_pixels(row_buf, w * 2);
+}
+
 void display_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg, int scale)
 {
     if (c < 0x20 || c > 0x7F) c = '?';

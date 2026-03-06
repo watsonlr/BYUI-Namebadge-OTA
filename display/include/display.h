@@ -81,6 +81,14 @@ void display_set_madctl(uint8_t madctl);
 void display_fill(uint16_t color);
 
 /**
+ * @brief Fill a rectangular region with a solid colour.
+ * @param x, y   Top-left corner (pixels).
+ * @param w, h   Width and height in pixels.
+ * @param color  RGB565 colour value (host byte-order).
+ */
+void display_fill_rect(int x, int y, int w, int h, uint16_t color);
+
+/**
  * @brief Draw a single ASCII character at pixel position (x, y).
  *
  * @param x      Left edge of the character cell.
