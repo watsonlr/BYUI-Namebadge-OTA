@@ -16,11 +16,24 @@
 extern "C" {
 #endif
 
-/** NVS namespace and keys written by the portal. */
-#define WIFI_CONFIG_NVS_NAMESPACE    "wifi_cfg"
+/**
+ * Dedicated NVS partition for user-entered badge configuration.
+ *
+ * This partition lives at the top of flash (0x3E0000) and is NEVER
+ * overwritten by OTA.  Even if a user loads their own firmware, the
+ * data here survives.  Any IDF application can read it with:
+ *
+ *   nvs_flash_init_partition(WIFI_CONFIG_NVS_PARTITION);
+ *   nvs_open_from_partition(WIFI_CONFIG_NVS_PARTITION,
+ *                           WIFI_CONFIG_NVS_NAMESPACE,
+ *                           NVS_READONLY, &h);
+ */
+#define WIFI_CONFIG_NVS_PARTITION    "user_data"
+#define WIFI_CONFIG_NVS_NAMESPACE    "badge_cfg"
 #define WIFI_CONFIG_NVS_KEY_SSID     "ssid"
 #define WIFI_CONFIG_NVS_KEY_PASS     "pass"
 #define WIFI_CONFIG_NVS_KEY_NICK     "nick"
+#define WIFI_CONFIG_NVS_KEY_EMAIL    "email"
 #define WIFI_CONFIG_NVS_KEY_MANIFEST "mfst"
 
 /**
@@ -49,8 +62,22 @@ void wifi_config_stop(void);
 bool wifi_config_done(void);
 
 /**
- * @brief Return the URL a phone should open to reach the portal.
- *        Always "http://192.168.4.1/" — useful for QR code generation.
+ * @brief Returns true once at least one station has associated with the AP.
+ *
+ * Useful for updating the display to indicate the phone has connected,
+ * before the captive-portal popup has been interacted with.
+ */
+bool wifi_config_sta_joined(void);
+
+/**
+ * @brief Return the device-unique AP SSID (e.g. "BYUI_NameBadge_F8").
+ *        Valid after wifi_config_start() is called.
+ */
+const char *wifi_config_ssid(void);
+
+/**
+ * @brief Return the device-unique URL for the config portal
+ *        (e.g. "http://192.168.60.8/"). Valid after wifi_config_start().
  */
 const char *wifi_config_url(void);
 

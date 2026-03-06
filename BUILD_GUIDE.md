@@ -101,3 +101,54 @@ idf.py build
 
 4. Copy the resulting `.bin` to `ota_files/apps/` and update `ota_files/manifest.json`.
 5. Run the OTA server: `python3 simple_ota_server.py` (if added — see `manifest.json.example`).
+
+---
+
+## AP IP Address (MAC-Derived, Per-Badge Unique)
+
+Each badge computes its own SoftAP IP address from the last two bytes of its factory eFuse MAC.
+
+### Formula
+
+Given MAC address `aa:bb:cc:dd:vv:ww` (6 bytes, `vv` = byte 4, `ww` = byte 5):
+
+```
+AP IP = 192.168.(vv % 240).(ww % 240)
+```
+
+- The last octet is clamped to a minimum of 1 to avoid using a network address (`x.x.x.0`).
+- The resulting IP is used for the SoftAP gateway, the DHCP server, the HTTP config portal, and the DNS hijack response.
+- All badges share the SSID `BYUI_NameBadge` but have different IPs, so they can operate in the same room without conflict.
+
+### Example
+
+| eFuse base MAC | vv (byte 4) | ww (byte 5) | AP IP |
+|---|---|---|---|
+| `a0:b7:65:12:3c:f8` | `0x3c` = 60 | `0xf8` = 248 | `192.168.60.8` (248 % 240 = 8) |
+| `a0:b7:65:12:00:00` | 0 | 0 | `192.168.0.1` (last octet clamped) |
+
+### Finding Your Badge's IP
+
+After flashing, open a serial monitor — the IP is logged at startup:
+
+```
+I (xxx) wifi_config: AP IP derived from MAC aa:bb:cc:dd:vv:ww → 192.168.X.Y
+I (xxx) wifi_config: SoftAP started: SSID="BYUI_NameBadge"  IP=192.168.X.Y
+```
+
+The badge also displays the URL on-screen below the QR code.
+
+### Reading the MAC Before Flashing (to predict the IP)
+
+```bash
+# WSL / Linux
+esptool.py --port /dev/ttyUSB0 read_mac
+```
+
+```powershell
+# Windows ESP-IDF PowerShell
+esptool.py --port COM3 read_mac
+```
+
+Output shows `MAC: aa:bb:cc:dd:vv:ww`. Apply the formula above.
+

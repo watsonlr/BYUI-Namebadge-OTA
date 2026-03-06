@@ -20,6 +20,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_http_server.h"
@@ -31,15 +32,38 @@
 
 #define TAG "wifi_config"
 
-#define AP_SSID      "BYUI_NameBadge"
-#define AP_CHANNEL   1
-#define AP_MAX_CONN  4
+#define AP_SSID_BASE  "BYUI_NameBadge"
+#define AP_CHANNEL    1
+#define AP_MAX_CONN   4
 
 static httpd_handle_t  s_server      = NULL;
 static bool            s_done        = false;
+static bool            s_sta_joined  = false;
 static esp_netif_t    *s_ap_netif    = NULL;
 static TaskHandle_t    s_dns_task    = NULL;
 static volatile bool   s_dns_running = false;
+
+/* ── AP station-connect event ────────────────────────────────────── */
+static void ap_event_handler(void *arg, esp_event_base_t base,
+                              int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        ESP_LOGI(TAG, "Station joined AP");
+        s_sta_joined = true;
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        /* Reset only if no other station is still associated */
+        s_sta_joined = false;
+    }
+}
+
+#define WIFI_CONFIG_NVS_PARTITION  "user_data"
+
+/* ── AP IP + SSID (MAC-derived, computed once in start_softap) ─────── */
+/* IP:   192.168.(mac[4] % 240).(mac[5] % 240); last octet ≥ 1.       */
+/* SSID: BYUI_NameBadge_XX  where XX = mac[5] as uppercase hex.        */
+static uint8_t s_ap_ip[4]    = {192, 168, 4, 1};
+static char    s_ap_url[28]  = "http://192.168.4.1/";
+static char    s_ap_ssid[20] = AP_SSID_BASE;
 
 /* ── Captive-portal DNS hijack ──────────────────────────────────── */
 /*
@@ -95,15 +119,17 @@ static void dns_server_task(void *arg)
         buf[10]= 0x00; buf[11]= 0x00;  /* ARCOUNT = 0 */
 
         /* Append answer RR: name ptr → offset 12, type A, class IN,
-         * TTL 0 (don't cache), RDLEN 4, 192.168.4.1               */
-        const uint8_t ans[] = {
+         * TTL 0 (don't cache), RDLEN 4, address from s_ap_ip         */
+        uint8_t ans[16] = {
             0xC0, 0x0C,              /* Name: pointer to offset 12  */
             0x00, 0x01,              /* Type: A                     */
             0x00, 0x01,              /* Class: IN                   */
             0x00, 0x00, 0x00, 0x00, /* TTL: 0                      */
             0x00, 0x04,              /* RDLENGTH: 4                 */
-            192, 168, 4, 1           /* RDATA: 192.168.4.1          */
+            0, 0, 0, 0               /* RDATA: filled below         */
         };
+        ans[12] = s_ap_ip[0];  ans[13] = s_ap_ip[1];
+        ans[14] = s_ap_ip[2];  ans[15] = s_ap_ip[3];
         memcpy(buf + n, ans, sizeof(ans));
         sendto(sock, buf, n + sizeof(ans), 0,
                (struct sockaddr *)&client, clen);
@@ -147,6 +173,8 @@ static const char *HTML_FORM =
     "<form method='POST' action='/save'>"
     "<label>Badge Nickname</label>"
     "<input name='nick' placeholder='e.g. Jane Smith' maxlength='32'>"
+    "<label>Email Address <small>(optional)</small></label>"
+    "<input name='email' type='email' placeholder='jane@example.com' maxlength='64'>"
     "<hr>"
     "<label>Wi-Fi SSID <small>(for OTA updates)</small></label>"
     "<input name='ssid' required maxlength='32'>"
@@ -176,7 +204,7 @@ static esp_err_t redirect_handler(httpd_req_t *req, httpd_err_code_t error)
 {
     (void)error;
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Location", s_ap_url);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Redirecting to setup page", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -252,9 +280,10 @@ static esp_err_t post_save_handler(httpd_req_t *req)
     }
     body[received] = '\0';
 
-    char ssid[33]     = {0};
-    char pass[65]     = {0};
-    char nick[33]     = {0};
+    char ssid[33]      = {0};
+    char pass[65]      = {0};
+    char nick[33]      = {0};
+    char email[65]     = {0};
     char manifest[129] = {0};
 
     if (!form_field(body, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
@@ -263,23 +292,27 @@ static esp_err_t post_save_handler(httpd_req_t *req)
     }
     form_field(body, "pass",     pass,     sizeof(pass));     /* optional */
     form_field(body, "nick",     nick,     sizeof(nick));     /* optional */
+    form_field(body, "email",    email,    sizeof(email));    /* optional */
     form_field(body, "manifest", manifest, sizeof(manifest)); /* optional */
 
-    /* Write to NVS */
+    /* Write to the dedicated user_data NVS partition (top of flash). */
     nvs_handle_t h;
-    esp_err_t err = nvs_open(WIFI_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(WIFI_CONFIG_NVS_PARTITION,
+                                            WIFI_CONFIG_NVS_NAMESPACE,
+                                            NVS_READWRITE, &h);
     if (err == ESP_OK) {
         nvs_set_str(h, WIFI_CONFIG_NVS_KEY_SSID,     ssid);
         nvs_set_str(h, WIFI_CONFIG_NVS_KEY_PASS,     pass);
         nvs_set_str(h, WIFI_CONFIG_NVS_KEY_NICK,     nick);
+        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_EMAIL,    email);
         nvs_set_str(h, WIFI_CONFIG_NVS_KEY_MANIFEST, manifest);
         nvs_commit(h);
         nvs_close(h);
-        ESP_LOGI(TAG, "Saved: nick='%s'  ssid='%s'  manifest='%s'",
-                 nick, ssid, manifest);
+        ESP_LOGI(TAG, "Saved to user_data: nick='%s' email='%s' ssid='%s'",
+                 nick, email, ssid);
         s_done = true;
     } else {
-        ESP_LOGE(TAG, "NVS write failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "user_data NVS write failed: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS error");
         return ESP_FAIL;
     }
@@ -330,25 +363,60 @@ static bool start_softap(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     s_ap_netif = esp_netif_create_default_wifi_ap();
+    /* ── Derive unique AP IP from factory eFuse MAC ────────────────
+     * Formula: 192.168.(mac[4] % 240).(mac[5] % 240)
+     * Last octet clamped to ≥ 1 so it is never a network address.  */
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
 
+    /* Unique SSID: BYUI_NameBadge_XX */
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s_%02X", AP_SSID_BASE, mac[5]);
+
+    /* Unique IP: 192.168.(mac[4]%240).(mac[5]%240) */
+    s_ap_ip[2] = mac[4] % 240;
+    s_ap_ip[3] = mac[5] % 240;
+    if (s_ap_ip[3] == 0) s_ap_ip[3] = 1;   /* avoid .X.0 network addr */
+    snprintf(s_ap_url, sizeof(s_ap_url), "http://%d.%d.%d.%d/",
+             s_ap_ip[0], s_ap_ip[1], s_ap_ip[2], s_ap_ip[3]);
+    ESP_LOGI(TAG, "AP: SSID=\"%s\"  IP=%d.%d.%d.%d  (MAC ...%02X:%02X)",
+             s_ap_ssid, s_ap_ip[0], s_ap_ip[1], s_ap_ip[2], s_ap_ip[3],
+             mac[4], mac[5]);
+
+    /* Apply custom IP to the netif before wifi starts. */
+    ESP_ERROR_CHECK(esp_netif_dhcps_stop(s_ap_netif));
+    esp_netif_ip_info_t ip_info = {0};
+    IP4_ADDR(&ip_info.ip,      s_ap_ip[0], s_ap_ip[1], s_ap_ip[2], s_ap_ip[3]);
+    IP4_ADDR(&ip_info.gw,      s_ap_ip[0], s_ap_ip[1], s_ap_ip[2], s_ap_ip[3]);
+    IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_ap_netif, &ip_info));
+    ESP_ERROR_CHECK(esp_netif_dhcps_start(s_ap_netif));
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    /* Register AP connect/disconnect events */
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT,
+        WIFI_EVENT_AP_STACONNECTED,   ap_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT,
+        WIFI_EVENT_AP_STADISCONNECTED, ap_event_handler, NULL));
+
     wifi_config_t ap_cfg = {
         .ap = {
-            .ssid            = AP_SSID,
-            .ssid_len        = strlen(AP_SSID),
+            .ssid_len        = 0,   /* set after strncpy below */
             .channel         = AP_CHANNEL,
             .authmode        = WIFI_AUTH_OPEN,
             .max_connection  = AP_MAX_CONN,
         },
     };
 
+    strncpy((char *)ap_cfg.ap.ssid, s_ap_ssid, sizeof(ap_cfg.ap.ssid) - 1);
+    ap_cfg.ap.ssid_len = (uint8_t)strlen(s_ap_ssid);
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "SoftAP started: SSID=\"%s\"  IP=192.168.4.1", AP_SSID);
+    ESP_LOGI(TAG, "SoftAP started: SSID=\"%s\"  IP=%d.%d.%d.%d",
+             s_ap_ssid, s_ap_ip[0], s_ap_ip[1], s_ap_ip[2], s_ap_ip[3]);
     return true;
 }
 
@@ -356,8 +424,15 @@ static bool start_softap(void)
 
 bool wifi_config_start(void)
 {
-    nvs_flash_init(); /* harmless if already initialised */
-    s_done = false;
+    nvs_flash_init(); /* system NVS — harmless if already initialised */
+    /* Init the dedicated user_data partition (idempotent). */
+    esp_err_t ue = nvs_flash_init_partition(WIFI_CONFIG_NVS_PARTITION);
+    if (ue == ESP_ERR_NVS_NO_FREE_PAGES || ue == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
+        nvs_flash_init_partition(WIFI_CONFIG_NVS_PARTITION);
+    }
+    s_done       = false;
+    s_sta_joined = false;
 
     if (!start_softap())      return false;
     if (!start_http_server()) return false;
@@ -385,7 +460,17 @@ bool wifi_config_done(void)
     return s_done;
 }
 
+bool wifi_config_sta_joined(void)
+{
+    return s_sta_joined;
+}
+
+const char *wifi_config_ssid(void)
+{
+    return s_ap_ssid;
+}
+
 const char *wifi_config_url(void)
 {
-    return "http://192.168.4.1/";
+    return s_ap_url;
 }

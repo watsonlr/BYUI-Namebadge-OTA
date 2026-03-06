@@ -45,7 +45,9 @@
 #define TAG "ota_manager"
 
 /* ── NVS ──────────────────────────────────────────────────────────── */
-#define NVS_NAMESPACE  "wifi_cfg"
+/* Read/write the same dedicated user_data partition used by wifi_config. */
+#define NVS_PARTITION  "user_data"
+#define NVS_NAMESPACE  "badge_cfg"
 #define NVS_KEY_SSID   "ssid"
 #define NVS_KEY_PASS   "pass"
 #define NVS_KEY_MFST   "mfst"
@@ -314,13 +316,21 @@ ota_result_t ota_manager_run(void)
     }
 
     /* ── Read NVS credentials ─────────────────────────────────── */
+    /* Ensure the user_data partition is mounted (idempotent). */
+    esp_err_t ue = nvs_flash_init_partition(NVS_PARTITION);
+    if (ue == ESP_ERR_NVS_NO_FREE_PAGES || ue == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase_partition(NVS_PARTITION);
+        nvs_flash_init_partition(NVS_PARTITION);
+    }
+
     char ssid[33]     = {0};
     char pass[65]     = {0};
     char mfst_url[129] = {0};
 
     nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
-        ESP_LOGE(TAG, "NVS open failed");
+    if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE,
+                                NVS_READONLY, &h) != ESP_OK) {
+        ESP_LOGE(TAG, "user_data NVS open failed");
         return OTA_RESULT_NO_WIFI;
     }
     size_t n;
@@ -341,7 +351,8 @@ ota_result_t ota_manager_run(void)
     /* ── Read last installed version ──────────────────────────── */
     uint32_t installed_ver = 0;
     nvs_handle_t hv;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &hv) == ESP_OK) {
+    if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE,
+                                NVS_READONLY, &hv) == ESP_OK) {
         nvs_get_u32(hv, NVS_KEY_OTAVER, &installed_ver);
         nvs_close(hv);
     }
@@ -487,7 +498,8 @@ ota_result_t ota_manager_run(void)
 
     /* ── Commit version to NVS ───────────────────────────────── */
     nvs_handle_t hv2;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &hv2) == ESP_OK) {
+    if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE,
+                                NVS_READWRITE, &hv2) == ESP_OK) {
         nvs_set_u32(hv2, NVS_KEY_OTAVER, manifest_ver);
         nvs_commit(hv2);
         nvs_close(hv2);
