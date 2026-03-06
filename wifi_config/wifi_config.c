@@ -27,7 +27,7 @@
 
 #define TAG "wifi_config"
 
-#define AP_SSID      "BADGE-CONFIG"
+#define AP_SSID      "BYUI_NameBadge"
 #define AP_CHANNEL   1
 #define AP_MAX_CONN  4
 
@@ -40,16 +40,30 @@ static const char *HTML_FORM =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>Badge Config</title>"
-    "<style>body{font-family:sans-serif;max-width:360px;margin:40px auto;padding:0 16px}"
-    "input{width:100%;box-sizing:border-box;padding:8px;margin:6px 0 16px}"
-    "button{width:100%;padding:10px;background:#006eb8;color:#fff;border:none;border-radius:4px;font-size:1em}"
+    "<title>BYUI Badge Setup</title>"
+    "<style>"
+    "body{font-family:sans-serif;max-width:400px;margin:40px auto;padding:0 16px}"
+    "h2{color:#006eb8}"
+    "label{display:block;font-weight:bold;font-size:.9em;margin-top:12px}"
+    "input{width:100%;box-sizing:border-box;padding:8px;margin:4px 0 2px;"
+          "border:1px solid #ccc;border-radius:4px}"
+    "hr{border:none;border-top:1px solid #e0e0e0;margin:18px 0}"
+    "button{margin-top:18px;width:100%;padding:12px;background:#006eb8;"
+           "color:#fff;border:none;border-radius:4px;font-size:1em;cursor:pointer}"
     "</style></head><body>"
-    "<h2>BYUI Badge Wi-Fi Setup</h2>"
+    "<h2>BYUI eBadge Setup</h2>"
     "<form method='POST' action='/save'>"
-    "<label>Wi-Fi SSID<br><input name='ssid' required maxlength='32'></label>"
-    "<label>Password (leave blank for open)<br><input name='pass' type='password' maxlength='64'></label>"
-    "<button type='submit'>Save &amp; Connect</button>"
+    "<label>Badge Nickname</label>"
+    "<input name='nick' placeholder='e.g. Jane Smith' maxlength='32'>"
+    "<hr>"
+    "<label>Wi-Fi SSID <small>(for OTA updates)</small></label>"
+    "<input name='ssid' required maxlength='32'>"
+    "<label>Wi-Fi Password <small>(leave blank if open)</small></label>"
+    "<input name='pass' type='password' maxlength='64'>"
+    "<hr>"
+    "<label>App Manifest URL</label>"
+    "<input name='manifest' placeholder='https://yoursite.github.io/catalog.json' maxlength='128'>"
+    "<button type='submit'>Save Settings</button>"
     "</form></body></html>";
 
 static const char *HTML_OK =
@@ -120,8 +134,8 @@ static esp_err_t get_root_handler(httpd_req_t *req)
 
 static esp_err_t post_save_handler(httpd_req_t *req)
 {
-    /* Limit body size to prevent overflow: SSID(32) + pass(64) + keys + & */
-    char body[200] = {0};
+    /* Buffer: ssid(32)+pass(64)+nick(32)+manifest(128)+keys/=& ≈ 290 → 512 */
+    char body[512] = {0};
     int received = httpd_req_recv(req, body, sizeof(body) - 1);
     if (received <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
@@ -129,24 +143,31 @@ static esp_err_t post_save_handler(httpd_req_t *req)
     }
     body[received] = '\0';
 
-    char ssid[33] = {0};
-    char pass[65] = {0};
+    char ssid[33]     = {0};
+    char pass[65]     = {0};
+    char nick[33]     = {0};
+    char manifest[129] = {0};
 
     if (!form_field(body, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing SSID");
         return ESP_FAIL;
     }
-    form_field(body, "pass", pass, sizeof(pass)); /* optional */
+    form_field(body, "pass",     pass,     sizeof(pass));     /* optional */
+    form_field(body, "nick",     nick,     sizeof(nick));     /* optional */
+    form_field(body, "manifest", manifest, sizeof(manifest)); /* optional */
 
     /* Write to NVS */
     nvs_handle_t h;
     esp_err_t err = nvs_open(WIFI_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err == ESP_OK) {
-        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_SSID, ssid);
-        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_PASS, pass);
+        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_SSID,     ssid);
+        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_PASS,     pass);
+        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_NICK,     nick);
+        nvs_set_str(h, WIFI_CONFIG_NVS_KEY_MANIFEST, manifest);
         nvs_commit(h);
         nvs_close(h);
-        ESP_LOGI(TAG, "Saved SSID: %s", ssid);
+        ESP_LOGI(TAG, "Saved: nick='%s'  ssid='%s'  manifest='%s'",
+                 nick, ssid, manifest);
         s_done = true;
     } else {
         ESP_LOGE(TAG, "NVS write failed: %s", esp_err_to_name(err));

@@ -17,9 +17,11 @@ extern "C" {
 #endif
 
 /** NVS namespace and keys written by the portal. */
-#define WIFI_CONFIG_NVS_NAMESPACE "wifi_cfg"
-#define WIFI_CONFIG_NVS_KEY_SSID  "ssid"
-#define WIFI_CONFIG_NVS_KEY_PASS  "pass"
+#define WIFI_CONFIG_NVS_NAMESPACE    "wifi_cfg"
+#define WIFI_CONFIG_NVS_KEY_SSID     "ssid"
+#define WIFI_CONFIG_NVS_KEY_PASS     "pass"
+#define WIFI_CONFIG_NVS_KEY_NICK     "nick"
+#define WIFI_CONFIG_NVS_KEY_MANIFEST "mfst"
 
 /**
  * @brief Start the SoftAP and HTTP configuration portal.

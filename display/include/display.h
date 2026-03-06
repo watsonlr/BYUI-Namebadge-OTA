@@ -120,6 +120,22 @@ void display_draw_string(int x, int y, const char *str,
 void display_print(const display_text_ctx_t *ctx, int x, int y, const char *str);
 
 /**
+ * @brief Write one horizontal strip of pixels at position (x, y).
+ *
+ * Pixels must already be in ILI9341 wire byte-order (big-endian RGB565,
+ * i.e. each uint16_t byte-swapped relative to host order).  This is the
+ * format produced by png_to_rgb565.py and is suitable for blitting
+ * pre-converted image data directly from flash to the display with no
+ * runtime conversion.
+ *
+ * @param x       Left edge in pixels.
+ * @param y       Row in pixels.
+ * @param w       Number of pixels to write.
+ * @param pixels  Pointer to w uint16_t values in wire byte-order.
+ */
+void display_draw_row_raw(int x, int y, int w, const uint16_t *pixels);
+
+/**
  * @brief Encode @p text as a QR code and draw it centred at (@p cx, @p cy).
  *
  * @param cx          Centre x (pixels).

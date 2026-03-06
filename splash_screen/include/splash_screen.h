@@ -19,13 +19,10 @@ extern "C" {
 /**
  * @brief Run the splash-screen animation to completion.
  *
- * Initialises SPI2 and the ILI9341 display, then reveals the image
- * row-by-row from the bottom of the screen upward (scroll-up effect).
- * After the full image is visible it holds for SPLASH_HOLD_MS then
- * returns.
- *
- * The SPI bus (SPI2_HOST) is left initialised so the caller can add
- * the SD-card device to the same bus afterwards if needed.
+ * Requires display_init() to have been called first.
+ * Clears the screen to black, then reveals the image row-by-row from
+ * the bottom upward (scroll-up effect).  Holds the completed image
+ * for SPLASH_HOLD_MS then returns.  The display remains active.
  */
 void splash_screen_run(void);
 

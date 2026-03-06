@@ -3,6 +3,9 @@
 #include "esp_log.h"
 #include "esp_psram.h"
 #include "display.h"
+#include "splash_screen.h"
+#include "portal_mode.h"
+#include "ota_manager.h"
 
 static const char *TAG = "main";
 
@@ -16,25 +19,17 @@ void app_main(void)
     }
 
     display_init();
-    display_fill(DISPLAY_COLOR_BLACK);
+    splash_screen_run();
 
-    /* Mono font, scale 2, white on black */
-    display_text_ctx_t mono = DISPLAY_CTX(DISPLAY_FONT_MONO, 2,
-                                          DISPLAY_COLOR_WHITE,
-                                          DISPLAY_COLOR_BLACK);
-    display_print(&mono, 8, 20, "Mono: Hello World");
+    /* Splash already holds 2 s; go straight into config portal. */
+    portal_mode_run(0);  /* 0 = wait forever for the user to submit */
 
-    /* Sans font, scale 2, yellow on black */
-    display_text_ctx_t sans = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                          DISPLAY_COLOR_YELLOW,
-                                          DISPLAY_COLOR_BLACK);
-    display_print(&sans, 8, 60, "Sans: Hello World");
-
-    /* Sans font, scale 3, cyan on black */
-    display_text_ctx_t big = DISPLAY_CTX(DISPLAY_FONT_SANS, 3,
-                                         DISPLAY_COLOR_CYAN,
-                                         DISPLAY_COLOR_BLACK);
-    display_print(&big, 8, 110, "Big Sans");
+    /* Connect to the saved network, check manifest, update if newer. */
+    ota_result_t ota_r = ota_manager_run();
+    if (ota_r != OTA_RESULT_UP_TO_DATE && ota_r != OTA_RESULT_UPDATED) {
+        ESP_LOGW(TAG, "OTA check failed: %d", (int)ota_r);
+    }
+    /* OTA_RESULT_UPDATED never reaches here — device already rebooted. */
 
     while (1) {
         vTaskDelay(portMAX_DELAY);

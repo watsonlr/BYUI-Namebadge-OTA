@@ -53,7 +53,7 @@ bool portal_mode_run(int timeout_s)
     display_text_ctx_t ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, TEXT_SCALE,
                                          DISPLAY_COLOR_BLACK,
                                          DISPLAY_COLOR_WHITE);
-    display_print(&ctx,  4, TEXT_Y_SSID, "WiFi: BADGE-CONFIG  (open)");
+    display_print(&ctx,  4, TEXT_Y_SSID, "WiFi: BYUI_NameBadge  (open)");
     display_print(&ctx, 20, TEXT_Y_URL,  "http://192.168.4.1/");
 
     /* ── Poll until done or timeout ── */

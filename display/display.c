@@ -507,6 +507,18 @@ void display_print(const display_text_ctx_t *ctx, int x, int y, const char *str)
     }
 }
 
+void display_draw_row_raw(int x, int y, int w, const uint16_t *pixels)
+{
+    set_window((uint16_t)x, (uint16_t)y,
+               (uint16_t)(x + w - 1), (uint16_t)y);
+    spi_transaction_t t = {
+        .length    = (size_t)w * 16,
+        .tx_buffer = pixels,
+        .user      = (void *)1,
+    };
+    ESP_ERROR_CHECK(spi_device_polling_transmit(s_spi, &t));
+}
+
 bool display_draw_qr(int cx, int cy, const char *text,
                      int module_px, uint16_t fg, uint16_t bg)
 {
