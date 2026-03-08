@@ -78,6 +78,8 @@ bool wifi_config_sta_joined(void);
  */
 bool wifi_config_form_served(void);
 
+
+
 /**
  * @brief Returns true if a badge nickname has already been saved to NVS.
  *

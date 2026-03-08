@@ -57,3 +57,8 @@ CONFIG_LWIP_MAX_SOCKETS=10
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# ─── HTTP Server ─────────────────────────────────────────────────
+# Real browser requests carry Accept, Cookie, and other headers that
+# easily exceed the default 512 B limit, producing "Header fields too long".
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048

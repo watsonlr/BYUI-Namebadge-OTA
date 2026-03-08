@@ -124,25 +124,34 @@ bool portal_mode_run(int timeout_s)
         if (!phase2_shown && wifi_config_sta_joined()) {
             phase2_shown = true;
 
-            /* Build URL QR string (just the bare URL) */
             draw_portal_screen(url, DISPLAY_COLOR_GREEN,
                                "Device Connected!",
                                NULL,
                                "Scan to open browser",
                                "If not open yet.");
-        }
 
-        /* ── Phase 3: form is open on phone — show text instructions ── */
-        if (!phase3_shown && wifi_config_form_served()) {
+
+
+        /* ── Phase 3: browser has loaded the form — drop QR, show text ──
+         * Requires Phase 2 has been visible for PHASE2_MIN_HOLD_MS so
+         * the user has time to scan the URL QR if the OS probe beat
+         * them to it.                                                  */
+        } else if (!phase3_shown && phase2_shown && wifi_config_form_served()) {
             phase3_shown = true;
 
+            /* White background, blue text — matches the web form style.
+             * No QR needed — the browser is already open on their phone. */
             display_fill(DISPLAY_COLOR_WHITE);
+
             display_text_ctx_t ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                                  DISPLAY_COLOR_BLACK,
-                                                  DISPLAY_COLOR_WHITE);
-            display_print(&ctx, centre_x("Fill out the form",  2),  88, "Fill out the form");
-            display_print(&ctx, centre_x("on your phone",       2), 112, "on your phone");
-            display_print(&ctx, centre_x("to continue",         2), 136, "to continue");
+                                                   DISPLAY_COLOR_BLUE,
+                                                   DISPLAY_COLOR_WHITE);
+            display_print(&ctx, centre_x("Fill out the form", 2),  88,
+                          "Fill out the form");
+            display_print(&ctx, centre_x("on your device", 2),    112,
+                          "on your device");
+            display_print(&ctx, centre_x("and save", 2),          136,
+                          "and save");
         }
 
         if (timeout_s > 0 && elapsed >= timeout_s * 1000) {
@@ -155,13 +164,46 @@ bool portal_mode_run(int timeout_s)
     ESP_LOGI(TAG, "Credentials saved — stopping portal");
     wifi_config_stop();
 
-    /* Brief "saved" confirmation on screen */
+    /* ── Step 4: Welcome screen with the saved badge nickname ── */
+    char nick[33] = {0};
+    wifi_config_get_nick(nick, sizeof(nick));
+
     display_fill(DISPLAY_COLOR_BLACK);
-    display_text_ctx_t ctx2 = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                           DISPLAY_COLOR_GREEN,
+
+    /* Green confirmation bar at the top */
+    display_fill_rect(0, 0, DISPLAY_W, 40, DISPLAY_COLOR_GREEN);
+
+    display_text_ctx_t hdr = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                          DISPLAY_COLOR_WHITE,
+                                          DISPLAY_COLOR_GREEN);
+    display_print(&hdr, centre_x("Setup Complete!", 2), 4,  "Setup Complete!");
+    display_print(&hdr, centre_x("Welcome to your", 2), 22, "Welcome to your");
+
+    display_text_ctx_t lbl = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                          DISPLAY_COLOR_YELLOW,
+                                          DISPLAY_COLOR_BLACK);
+    display_print(&lbl, centre_x("eBadge!", 2), 52, "eBadge!");
+
+    /* Badge nickname — scale 3 if it fits, else scale 2 */
+    int name_scale = (strlen(nick) * DISPLAY_FONT_W * 3 <= DISPLAY_W) ? 3 : 2;
+    display_text_ctx_t name_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, name_scale,
+                                               DISPLAY_COLOR_WHITE,
+                                               DISPLAY_COLOR_BLACK);
+    display_print(&name_ctx,
+                  centre_x(nick, name_scale),
+                  90, nick);
+
+    display_text_ctx_t info = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
+                                           DISPLAY_COLOR_CYAN,
                                            DISPLAY_COLOR_BLACK);
-    display_print(&ctx2, 60, 100, "Wi-Fi Saved!");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    display_print(&info, centre_x("Connecting to Wi-Fi...", 1), 150,
+                  "Connecting to Wi-Fi...");
+    display_print(&info, centre_x("Checking for updates.", 1), 164,
+                  "Checking for updates.");
+    display_print(&info, centre_x("This may take a moment.", 1), 178,
+                  "This may take a moment.");
+
+    vTaskDelay(pdMS_TO_TICKS(3000));
 
     return true;
 }

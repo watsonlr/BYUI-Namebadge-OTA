@@ -36,13 +36,18 @@
 #define AP_CHANNEL    1
 #define AP_MAX_CONN   4
 
-static httpd_handle_t  s_server      = NULL;
-static bool            s_done        = false;
-static bool            s_sta_joined  = false;
-static bool            s_form_served = false;
-static esp_netif_t    *s_ap_netif    = NULL;
-static TaskHandle_t    s_dns_task    = NULL;
-static volatile bool   s_dns_running = false;
+static httpd_handle_t  s_server          = NULL;
+static volatile bool   s_done            = false;
+static volatile bool   s_sta_joined      = false;
+static volatile bool   s_form_served     = false;
+static esp_netif_t    *s_ap_netif        = NULL;
+static TaskHandle_t    s_dns_task        = NULL;
+static volatile bool   s_dns_running     = false;
+
+/* ── Wi-Fi scan results (populated once at startup) ─────────────── */
+#define MAX_SCAN_APS  20
+static wifi_ap_record_t s_scan_aps[MAX_SCAN_APS];
+static uint16_t         s_scan_count = 0;
 
 /* ── AP station-connect event ────────────────────────────────────── */
 static void ap_event_handler(void *arg, esp_event_base_t base,
@@ -65,6 +70,65 @@ static void ap_event_handler(void *arg, esp_event_base_t base,
 static uint8_t s_ap_ip[4]    = {192, 168, 4, 1};
 static char    s_ap_url[28]  = "http://192.168.4.1/";
 static char    s_ap_ssid[20] = AP_SSID_BASE;
+
+/* ── HTML-attribute escaping ─────────────────────────────────────── */
+
+/** Write HTML-escaped src into [*p, end).  Advances *p.  Returns false if truncated. */
+static bool html_esc(char **p, const char *end, const char *src)
+{
+    for (; *src; src++) {
+        const char *ent = NULL;
+        switch (*src) {
+            case '&':  ent = "&amp;";  break;
+            case '<':  ent = "&lt;";   break;
+            case '>':  ent = "&gt;";   break;
+            case '"':  ent = "&quot;"; break;
+            case '\'': ent = "&#39;";  break;
+            default:   break;
+        }
+        if (ent) {
+            size_t el = strlen(ent);
+            if (*p + el >= end) return false;
+            memcpy(*p, ent, el);
+            *p += el;
+        } else {
+            if (*p + 1 >= end) return false;
+            *(*p)++ = *src;
+        }
+    }
+    return true;
+}
+
+/* ── Wi-Fi scan (runs once at startup, AP+STA concurrent mode) ───── */
+
+static void scan_nearby_networks(void)
+{
+    esp_netif_t *sta = esp_netif_create_default_wifi_sta();
+
+    if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not enter APSTA mode for scan");
+        esp_netif_destroy(sta);
+        return;
+    }
+
+    wifi_scan_config_t cfg = {
+        .scan_type            = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active.min = 100,
+        .scan_time.active.max = 250,
+    };
+    if (esp_wifi_scan_start(&cfg, true) == ESP_OK) {
+        s_scan_count = MAX_SCAN_APS;
+        esp_wifi_scan_get_ap_records(&s_scan_count, s_scan_aps);
+        ESP_LOGI(TAG, "WiFi scan: %u APs found", s_scan_count);
+    } else {
+        s_scan_count = 0;
+        ESP_LOGW(TAG, "WiFi scan failed — SSID field will be free-text");
+    }
+
+    /* Return to pure-AP mode and tear down the temporary STA netif. */
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_netif_destroy(sta);
+}
 
 /* ── Captive-portal DNS hijack ──────────────────────────────────── */
 /*
@@ -154,8 +218,8 @@ static void stop_dns_server(void)
     s_dns_task = NULL;
 }
 
-/* ── HTML page ──────────────────────────────────────────────────── */
-static const char *HTML_FORM =
+/* ── HTML page (split around the dynamic SSID field) ────────────── */
+static const char HTML_FORM_HEAD[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -164,7 +228,7 @@ static const char *HTML_FORM =
     "body{font-family:sans-serif;max-width:400px;margin:40px auto;padding:0 16px}"
     "h2{color:#006eb8}"
     "label{display:block;font-weight:bold;font-size:.9em;margin-top:12px}"
-    "input{width:100%;box-sizing:border-box;padding:8px;margin:4px 0 2px;"
+    "input,select{width:100%;box-sizing:border-box;padding:8px;margin:4px 0 2px;"
           "border:1px solid #ccc;border-radius:4px}"
     "hr{border:none;border-top:1px solid #e0e0e0;margin:18px 0}"
     "button{margin-top:18px;width:100%;padding:12px;background:#006eb8;"
@@ -177,8 +241,9 @@ static const char *HTML_FORM =
     "<label>Email Address <small>(optional)</small></label>"
     "<input name='email' type='email' placeholder='jane@example.com' maxlength='64'>"
     "<hr>"
-    "<label>Wi-Fi SSID <small>(for OTA updates)</small></label>"
-    "<input name='ssid' required maxlength='32' value='BYUI_Visitor'>"
+    "<label>SSID &mdash; Select or Enter <small>(for OTA updates)</small></label>";
+
+static const char HTML_FORM_TAIL[] =
     "<label>Wi-Fi Password <small>(leave blank if open)</small></label>"
     "<input name='pass' type='password' maxlength='64'>"
     "<hr>"
@@ -265,16 +330,85 @@ static bool form_field(const char *body, const char *key,
 
 static esp_err_t get_root_handler(httpd_req_t *req)
 {
-    s_form_served = true;
+    /* Only flag form-served when a real browser loads the page.
+     * OS captive-portal auto-probes (iOS CaptiveNetworkSupport,
+     * Android Dalvik, Windows NCSI, etc.) do NOT send a Mozilla
+     * User-Agent string — so we ignore them here.
+     *
+     * httpd_req_get_hdr_value_str returns ESP_ERR_HTTPD_RESULT_TRUNC
+     * when the UA is longer than the buffer (common — real UAs are
+     * 100+ chars).  We accept that too: "Mozilla" is always the very
+     * first word so a 64-byte truncated read still captures it.      */
+    char ua[64] = {0};
+    esp_err_t ua_err = httpd_req_get_hdr_value_str(req, "User-Agent",
+                                                    ua, sizeof(ua));
+    if ((ua_err == ESP_OK || ua_err == ESP_ERR_HTTPD_RESULT_TRUNC)
+            && strstr(ua, "Mozilla") != NULL) {
+        s_form_served = true;
+    }
+
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, HTML_FORM, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+
+    /* ── Head (everything up to the SSID field) ── */
+    httpd_resp_sendstr_chunk(req, HTML_FORM_HEAD);
+
+    /* ── SSID field: datalist of discovered networks ── */
+    if (s_scan_count > 0) {
+        /* An <input list='nets'> lets the user pick from the dropdown
+         * OR type any custom SSID — no JS required.                  */
+        httpd_resp_sendstr_chunk(req,
+            "<input name='ssid' list='nets' required maxlength='32'"
+            " placeholder='Select or type SSID'>"
+            "<datalist id='nets'>");
+
+        for (uint16_t i = 0; i < s_scan_count; i++) {
+            const char *ssid = (const char *)s_scan_aps[i].ssid;
+            if (ssid[0] == '\0') continue;   /* skip hidden networks */
+
+            /* Deduplicate (simple O(n²) — list is max 20 entries) */
+            bool dup = false;
+            for (uint16_t j = 0; j < i; j++) {
+                if (strcmp(ssid, (const char *)s_scan_aps[j].ssid) == 0) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+
+            /* Build "<option value='ESCAPED_SSID'>" safely */
+            char opt[96];
+            char *p   = opt;
+            char *end = opt + sizeof(opt) - 1;
+            const char *pre = "<option value='";
+            memcpy(p, pre, strlen(pre));
+            p += strlen(pre);
+            html_esc(&p, end, ssid);
+            if (p + 2 <= end) { *p++ = '\''; *p++ = '>'; }
+            *p = '\0';
+            httpd_resp_sendstr_chunk(req, opt);
+        }
+
+        httpd_resp_sendstr_chunk(req, "</datalist>");
+    } else {
+        /* Fallback when scan yielded nothing */
+        httpd_resp_sendstr_chunk(req,
+            "<input name='ssid' required maxlength='32'"
+            " placeholder='Network name'>");
+    }
+
+    /* ── Tail (password, manifest, button, closing tags) ── */
+    httpd_resp_sendstr_chunk(req, HTML_FORM_TAIL);
+    httpd_resp_sendstr_chunk(req, NULL);   /* end chunked transfer */
     return ESP_OK;
 }
 
 static esp_err_t post_save_handler(httpd_req_t *req)
 {
-    /* Buffer: ssid(32)+pass(64)+nick(32)+manifest(128)+keys/=& ≈ 290 → 512 */
-    char body[512] = {0};
+    /* Buffer: fields up to 32+64+32+64+128 = 320 raw chars, but URL-encoding
+     * can triple special characters (e.g. a password full of symbols).
+     * 1024 B gives comfortable headroom.                                  */
+    char body[1024] = {0};
     int received = httpd_req_recv(req, body, sizeof(body) - 1);
     if (received <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
@@ -344,6 +478,7 @@ static bool start_http_server(void)
     cfg.server_port      = 80;
     cfg.max_open_sockets = 4;
     cfg.lru_purge_enable = true;
+    /* Header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig. */
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP server start failed");
@@ -419,6 +554,11 @@ static bool start_softap(void)
 
     ESP_LOGI(TAG, "SoftAP started: SSID=\"%s\"  IP=%d.%d.%d.%d",
              s_ap_ssid, s_ap_ip[0], s_ap_ip[1], s_ap_ip[2], s_ap_ip[3]);
+
+    /* Scan nearby networks now so the form can show a dropdown.
+     * Temporarily uses APSTA mode; reverts to AP before returning. */
+    scan_nearby_networks();
+
     return true;
 }
 
@@ -472,6 +612,8 @@ bool wifi_config_form_served(void)
 {
     return s_form_served;
 }
+
+
 
 const char *wifi_config_ssid(void)
 {

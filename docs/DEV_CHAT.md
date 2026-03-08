@@ -244,3 +244,80 @@ To support USB Host on a future revision:
 - Target: `esp32s3`
 - Flash: `idf.py -p COM<X> flash` (PowerShell) or `idf.py -p /dev/ttyUSB0 flash` (Linux)
 - Build confirmed clean as of 2026-03-07
+
+---
+
+## 2026-03-08
+
+### Portal — Phase 3 screen redesign
+The "Form is open" screen was redesigned to be cleaner and more consistent with the web form styling:
+
+- **Before:** Black background, green header bar with "Form is open!" / "Fill it out on", white body text, cyan small hint lines ("Enter your name, Wi-Fi, …")
+- **After:** Plain white background, blue text (matching the web form's `#006eb8`), three centered lines only — no header bar, no hints
+
+```
+Fill out the form
+ on your device
+   and save
+```
+
+The word "save" was chosen to match the "Save Settings" button label on the web form (was "and submit").
+
+**Files changed:** `portal_mode/portal_mode.c`
+
+---
+
+### Portal — HTTP header buffer enlarged
+Form submissions from real browsers were failing with a 431 "Header fields too long" error.
+
+**Root cause:** `CONFIG_HTTPD_MAX_REQ_HDR_LEN` was 512 bytes — too small for browser `Accept`, `Accept-Language`, and other headers.
+
+**Fix:** Set `CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048` in both `sdkconfig` and `sdkconfig.defaults`. This is a Kconfig-only setting in ESP-IDF 5.3; there is no runtime struct field for it.
+
+POST body buffer also enlarged from 512 → 1024 bytes in `wifi_config.c` to give headroom for URL-encoded special characters in passwords.
+
+**Files changed:** `sdkconfig`, `sdkconfig.defaults`, `wifi_config/wifi_config.c`
+
+---
+
+### Portal — Phase 2→3 transition fix (OS probe race)
+When a phone joins the badge's AP, iOS/Android/Windows automatically fire a `GET /` probe to detect captive portals. This was setting `s_form_served = true` before Phase 2 had even drawn, causing an immediate skip to Phase 3.
+
+**Fix:** Only set `s_form_served` when the request carries a `Mozilla` User-Agent — something all real browsers include but OS probes do not.
+
+`httpd_req_get_hdr_value_str` returns `ESP_ERR_HTTPD_RESULT_TRUNC` when the UA is longer than the buffer (real UAs are 100+ chars). Code accepts both `ESP_OK` and `ESP_ERR_HTTPD_RESULT_TRUNC`; "Mozilla" is always the first token so a 64-byte truncated read still catches it.
+
+An `else if` guard on the polling loop prevents Phase 3 from firing on the same tick as Phase 2.
+
+**Files changed:** `wifi_config/wifi_config.c`, `portal_mode/portal_mode.c`
+
+---
+
+### Portal — SSID field replaced with discovered-network dropdown
+Replaced the static `value='BYUI_Visitor'` text input with a dynamic `<input list='nets'>` + `<datalist>` built from a real-time WiFi scan.
+
+**Implementation:**
+1. After `esp_wifi_start()`, `start_softap()` calls `scan_nearby_networks()`.
+2. `scan_nearby_networks()` briefly switches to `WIFI_MODE_APSTA`, runs a blocking active scan (100–250 ms per channel), collects up to 20 AP records, then reverts to `WIFI_MODE_AP`.
+3. `get_root_handler()` switched from `httpd_resp_send` to chunked transfer (`httpd_resp_sendstr_chunk`) and builds the SSID field on the fly: `<input name='ssid' list='nets'>` followed by `<datalist>` options for each discovered SSID (hidden SSIDs and duplicates skipped; names HTML-escaped via `html_esc()` helper to prevent injection).
+4. Label changed to **"SSID — Select or Enter"**.
+5. Fallback: if scan yields 0 results, a plain `<input>` is rendered with a placeholder.
+
+The user can both pick from the dropdown list **and** type any custom value — standard HTML `<datalist>` behaviour, no JavaScript needed.
+
+**Files changed:** `wifi_config/wifi_config.c`
+
+---
+
+### VS Code — CMake Tools popup suppressed
+"Bad CMake executable" banner was appearing every time the workspace opened.
+
+**Fix:** Added to `.vscode/settings.json`:
+```json
+"cmake.enabled": false
+```
+This completely disables the CMake Tools extension for the workspace (ESP-IDF has its own CMake integration; CMake Tools is not needed here).
+
+Earlier mitigations (`configureOnOpen: false`, `automaticReconfigure: false`, `configureOnEdit: false`) were insufficient — the extension still activated. `cmake.enabled: false` is the definitive fix.
+
+**Files changed:** `.vscode/settings.json`
