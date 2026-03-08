@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +69,30 @@ bool wifi_config_done(void);
  * before the captive-portal popup has been interacted with.
  */
 bool wifi_config_sta_joined(void);
+
+/**
+ * @brief Returns true once the setup form has been served to a browser.
+ *
+ * Useful for updating the display with form-filling instructions as soon
+ * as a phone opens the page.
+ */
+bool wifi_config_form_served(void);
+
+/**
+ * @brief Returns true if a badge nickname has already been saved to NVS.
+ *
+ * Call this at boot (before wifi_config_start) to decide whether to skip
+ * the configuration portal entirely.
+ */
+bool wifi_config_is_configured(void);
+
+/**
+ * @brief Copy the saved badge nickname into @p out (NUL-terminated).
+ *
+ * @param out     Destination buffer.
+ * @param outlen  Size of destination buffer (at least 33 bytes recommended).
+ */
+void wifi_config_get_nick(char *out, size_t outlen);
 
 /**
  * @brief Return the device-unique AP SSID (e.g. "BYUI_NameBadge_F8").

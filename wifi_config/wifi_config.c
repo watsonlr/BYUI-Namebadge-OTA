@@ -39,6 +39,7 @@
 static httpd_handle_t  s_server      = NULL;
 static bool            s_done        = false;
 static bool            s_sta_joined  = false;
+static bool            s_form_served = false;
 static esp_netif_t    *s_ap_netif    = NULL;
 static TaskHandle_t    s_dns_task    = NULL;
 static volatile bool   s_dns_running = false;
@@ -264,6 +265,7 @@ static bool form_field(const char *body, const char *key,
 
 static esp_err_t get_root_handler(httpd_req_t *req)
 {
+    s_form_served = true;
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, HTML_FORM, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -431,8 +433,9 @@ bool wifi_config_start(void)
         nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
         nvs_flash_init_partition(WIFI_CONFIG_NVS_PARTITION);
     }
-    s_done       = false;
-    s_sta_joined = false;
+    s_done        = false;
+    s_sta_joined  = false;
+    s_form_served = false;
 
     if (!start_softap())      return false;
     if (!start_http_server()) return false;
@@ -465,6 +468,11 @@ bool wifi_config_sta_joined(void)
     return s_sta_joined;
 }
 
+bool wifi_config_form_served(void)
+{
+    return s_form_served;
+}
+
 const char *wifi_config_ssid(void)
 {
     return s_ap_ssid;
@@ -473,4 +481,42 @@ const char *wifi_config_ssid(void)
 const char *wifi_config_url(void)
 {
     return s_ap_url;
+}
+
+bool wifi_config_is_configured(void)
+{
+    /* Initialise the user_data partition (idempotent). */
+    esp_err_t ue = nvs_flash_init_partition(WIFI_CONFIG_NVS_PARTITION);
+    if (ue == ESP_ERR_NVS_NO_FREE_PAGES || ue == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
+        nvs_flash_init_partition(WIFI_CONFIG_NVS_PARTITION);
+    }
+
+    nvs_handle_t h;
+    if (nvs_open_from_partition(WIFI_CONFIG_NVS_PARTITION,
+                                WIFI_CONFIG_NVS_NAMESPACE,
+                                NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    char nick[33] = {0};
+    size_t len = sizeof(nick);
+    nvs_get_str(h, WIFI_CONFIG_NVS_KEY_NICK, nick, &len);
+    nvs_close(h);
+    return nick[0] != '\0';
+}
+
+void wifi_config_get_nick(char *out, size_t outlen)
+{
+    if (!out || outlen == 0) return;
+    out[0] = '\0';
+
+    nvs_handle_t h;
+    if (nvs_open_from_partition(WIFI_CONFIG_NVS_PARTITION,
+                                WIFI_CONFIG_NVS_NAMESPACE,
+                                NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    size_t len = outlen;
+    nvs_get_str(h, WIFI_CONFIG_NVS_KEY_NICK, out, &len);
+    nvs_close(h);
 }

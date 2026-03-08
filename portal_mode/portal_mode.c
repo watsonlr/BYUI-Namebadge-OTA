@@ -114,6 +114,7 @@ bool portal_mode_run(int timeout_s)
     int elapsed = 0;
     const int poll_ms = 500;
     bool phase2_shown = false;
+    bool phase3_shown = false;
 
     while (!wifi_config_done()) {
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
@@ -129,6 +130,19 @@ bool portal_mode_run(int timeout_s)
                                NULL,
                                "Scan to open browser",
                                "If not open yet.");
+        }
+
+        /* ── Phase 3: form is open on phone — show text instructions ── */
+        if (!phase3_shown && wifi_config_form_served()) {
+            phase3_shown = true;
+
+            display_fill(DISPLAY_COLOR_WHITE);
+            display_text_ctx_t ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                                  DISPLAY_COLOR_BLACK,
+                                                  DISPLAY_COLOR_WHITE);
+            display_print(&ctx, centre_x("Fill out the form",  2),  88, "Fill out the form");
+            display_print(&ctx, centre_x("on your phone",       2), 112, "on your phone");
+            display_print(&ctx, centre_x("to continue",         2), 136, "to continue");
         }
 
         if (timeout_s > 0 && elapsed >= timeout_s * 1000) {
