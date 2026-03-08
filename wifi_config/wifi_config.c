@@ -177,7 +177,7 @@ static const char *HTML_FORM =
     "<input name='email' type='email' placeholder='jane@example.com' maxlength='64'>"
     "<hr>"
     "<label>Wi-Fi SSID <small>(for OTA updates)</small></label>"
-    "<input name='ssid' required maxlength='32'>"
+    "<input name='ssid' required maxlength='32' value='BYUI_Visitor'>"
     "<label>Wi-Fi Password <small>(leave blank if open)</small></label>"
     "<input name='pass' type='password' maxlength='64'>"
     "<hr>"
