@@ -10,6 +10,7 @@
 #include "portal_mode.h"
 #include "ota_manager.h"
 #include "wifi_config.h"
+#include "leds.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -96,6 +97,10 @@ void app_main(void)
     nvs_flash_init();
 
     display_init();
+    leds_init();
+    /* Startup glow: dim BYUI blue on all LEDs while splash plays. */
+    leds_fill(0, 30, 80);  /* R=0 G=30 B=80 → muted blue */
+    leds_show();
     splash_screen_run();
 
     if (wifi_config_is_configured()) {
