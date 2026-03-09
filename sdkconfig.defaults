@@ -23,6 +23,7 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # quad mode (the IDF default) returns ID 0x00000000 and fails.
 # IGNORE_NOTFOUND lets the board boot even if PSRAM init fails.
 CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_TYPE_AUTO=y

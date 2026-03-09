@@ -29,8 +29,6 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "esp_psram.h"
-#include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -187,44 +185,79 @@ static esp_err_t http_get_text(const char *url, char *out, size_t out_max,
     return total > 0 ? ESP_OK : ESP_FAIL;
 }
 
-/* ── HTTP: stream firmware binary into a PSRAM buffer ────────────── */
-static esp_err_t http_download_firmware(const char *url, uint8_t *buf,
-                                         int expected_size, int *downloaded)
-{
-    esp_http_client_config_t cfg = {
-        .url               = url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms        = 120000,   /* 2-minute cap for large binaries */
-        .buffer_size       = 8192,
-        .max_redirection_count = 3,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return ESP_FAIL;
+/* ── Stream firmware from HTTP directly into OTA flash partition ──── *
+ *
+ * Downloads in 8 KB chunks, hashes incrementally with SHA-256, and
+ * writes each chunk to the inactive OTA partition as it arrives.
+ * No PSRAM or large RAM buffer required.                              */
+#define OTA_CHUNK_SIZE 8192
+static uint8_t s_ota_chunk[OTA_CHUNK_SIZE];   /* static → BSS, not stack */
 
-    esp_err_t err = esp_http_client_open(client, 0);
+static esp_err_t http_stream_and_flash(const char *url, int expected_size,
+                                        const char *sha256_expected)
+{
+    /* Open OTA partition for writing */
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        ESP_LOGE(TAG, "No OTA partition available");
+        return ESP_FAIL;
+    }
+    esp_ota_handle_t ota_handle;
+    esp_err_t err = esp_ota_begin(part, OTA_SIZE_UNKNOWN, &ota_handle);
     if (err != ESP_OK) {
-        esp_http_client_cleanup(client);
+        ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
         return err;
     }
 
-    esp_http_client_fetch_headers(client);
+    esp_http_client_config_t cfg = {
+        .url               = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms        = 120000,
+        .buffer_size       = OTA_CHUNK_SIZE,
+        .max_redirection_count = 3,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) { esp_ota_abort(ota_handle); return ESP_FAIL; }
 
+    err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        esp_http_client_cleanup(client);
+        esp_ota_abort(ota_handle);
+        return err;
+    }
+    esp_http_client_fetch_headers(client);
     if (esp_http_client_get_status_code(client) != 200) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
+        esp_ota_abort(ota_handle);
         return ESP_FAIL;
     }
 
-    int total = 0;
-    int last_pct = -1;
+    /* SHA-256 context — hashed incrementally as chunks arrive */
+    mbedtls_sha256_context sha_ctx;
+    mbedtls_sha256_init(&sha_ctx);
+    mbedtls_sha256_starts(&sha_ctx, 0);
+
+    int total = 0, last_pct = -1;
+    err = ESP_OK;
+
     while (total < expected_size) {
-        int n = esp_http_client_read(client, (char *)(buf + total),
-                                     expected_size - total);
+        int want = expected_size - total;
+        if (want > OTA_CHUNK_SIZE) want = OTA_CHUNK_SIZE;
+        int n = esp_http_client_read(client, (char *)s_ota_chunk, want);
         if (n < 0) { err = ESP_FAIL; break; }
         if (n == 0)  break;
+
+        mbedtls_sha256_update(&sha_ctx, s_ota_chunk, n);
+
+        esp_err_t we = esp_ota_write(ota_handle, s_ota_chunk, n);
+        if (we != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write: %s", esp_err_to_name(we));
+            err = we;
+            break;
+        }
         total += n;
 
-        /* Refresh progress display every ~5% */
         int pct = (int)(100LL * total / expected_size);
         if (pct / 5 != last_pct / 5) {
             last_pct = pct;
@@ -233,69 +266,41 @@ static esp_err_t http_download_firmware(const char *url, uint8_t *buf,
             show_status("Downloading...", prog);
         }
     }
-    *downloaded = total;
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return (err == ESP_OK && total == expected_size) ? ESP_OK : ESP_FAIL;
-}
 
-/* ── SHA-256 verify ───────────────────────────────────────────────── */
-static bool sha256_verify(const uint8_t *data, size_t len, const char *expected_hex)
-{
-    uint8_t hash[32];
-
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0);   /* 0 = SHA-256 */
-    mbedtls_sha256_update(&ctx, data, len);
-    mbedtls_sha256_finish(&ctx, hash);
-    mbedtls_sha256_free(&ctx);
-
-    char computed[65] = {0};
-    for (int i = 0; i < 32; i++) {
-        snprintf(computed + 2 * i, 3, "%02x", hash[i]);
-    }
-
-    bool ok = (strcmp(computed, expected_hex) == 0);
-    if (!ok) {
-        ESP_LOGE(TAG, "SHA-256 mismatch\n  expected: %s\n  computed: %s",
-                 expected_hex, computed);
-    }
-    return ok;
-}
-
-/* ── Write PSRAM buffer → inactive OTA partition ─────────────────── */
-static esp_err_t flash_from_psram(const uint8_t *buf, int size)
-{
-    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
-    if (!part) {
-        ESP_LOGE(TAG, "No OTA update partition found");
+    if (err != ESP_OK || total != expected_size) {
+        ESP_LOGE(TAG, "Download incomplete: %d of %d bytes", total, expected_size);
+        mbedtls_sha256_free(&sha_ctx);
+        esp_ota_abort(ota_handle);
+        show_status("Download failed", NULL);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "Writing %d bytes to partition %s @ 0x%08"PRIx32,
-             size, part->label, part->address);
 
-    esp_ota_handle_t handle;
-    esp_err_t err = esp_ota_begin(part, OTA_SIZE_UNKNOWN, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
-        return err;
+    /* Verify SHA-256 over the received data */
+    uint8_t hash[32];
+    mbedtls_sha256_finish(&sha_ctx, hash);
+    mbedtls_sha256_free(&sha_ctx);
+    char computed[65] = {0};
+    for (int i = 0; i < 32; i++) snprintf(computed + 2*i, 3, "%02x", hash[i]);
+    if (strcmp(computed, sha256_expected) != 0) {
+        ESP_LOGE(TAG, "SHA-256 mismatch\n  expected: %s\n  computed: %s",
+                 sha256_expected, computed);
+        esp_ota_abort(ota_handle);
+        show_status("SHA-256 mismatch!", "Update aborted");
+        return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "SHA-256 verified OK");
 
-    err = esp_ota_write(handle, buf, size);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_write: %s", esp_err_to_name(err));
-        esp_ota_abort(handle);
-        return err;
-    }
-
-    err = esp_ota_end(handle);
+    /* Finalise and mark partition bootable */
+    show_status("Installing update...", "Do not power off");
+    err = esp_ota_end(ota_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(err));
+        show_status("Flash write failed", NULL);
         return err;
     }
-
     err = esp_ota_set_boot_partition(part);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
@@ -308,13 +313,6 @@ static esp_err_t flash_from_psram(const uint8_t *buf, int size)
  * ══════════════════════════════════════════════════════════════════ */
 ota_result_t ota_manager_run(void)
 {
-    /* ── PSRAM sanity check ───────────────────────────────────── */
-    if (esp_psram_get_size() == 0) {
-        ESP_LOGE(TAG, "PSRAM not available");
-        show_status("OTA: no PSRAM", NULL);
-        return OTA_RESULT_NO_PSRAM;
-    }
-
     /* ── Read NVS credentials ─────────────────────────────────── */
     /* Ensure the user_data partition is mounted (idempotent). */
     esp_err_t ue = nvs_flash_init_partition(NVS_PARTITION);
@@ -444,57 +442,13 @@ ota_result_t ota_manager_run(void)
         return OTA_RESULT_FLASH_FAIL;
     }
 
-    /* ── Verify image fits in free PSRAM ──────────────────────── */
-    size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    if ((size_t)fw_size > psram_free) {
-        ESP_LOGE(TAG, "Firmware %d B > free PSRAM %u B", fw_size, (unsigned)psram_free);
-        show_status("OTA: not enough PSRAM", NULL);
-        wifi_sta_disconnect();
-        return OTA_RESULT_NO_PSRAM;
-    }
-
-    /* ── Allocate PSRAM staging buffer ───────────────────────── */
-    uint8_t *fw_buf = (uint8_t *)heap_caps_malloc(fw_size, MALLOC_CAP_SPIRAM);
-    if (!fw_buf) {
-        ESP_LOGE(TAG, "PSRAM malloc(%d) failed", fw_size);
-        show_status("OTA: PSRAM alloc failed", NULL);
-        wifi_sta_disconnect();
-        return OTA_RESULT_NO_PSRAM;
-    }
-    ESP_LOGI(TAG, "Allocated %d B in PSRAM @ %p", fw_size, fw_buf);
-
-    /* ── Download firmware into PSRAM ──────────────────────────── */
-    int downloaded = 0;
-    esp_err_t dl_err = http_download_firmware(fw_url, fw_buf, fw_size, &downloaded);
-    if (dl_err != ESP_OK || downloaded != fw_size) {
-        ESP_LOGE(TAG, "Download failed: got %d of %d bytes", downloaded, fw_size);
-        show_status("Download failed", NULL);
-        heap_caps_free(fw_buf);
-        wifi_sta_disconnect();
+    /* ── Stream download → hash → flash (no PSRAM needed) ────── */
+    show_status("Downloading...", NULL);
+    esp_err_t ota_err = http_stream_and_flash(fw_url, fw_size, sha256_hex);
+    wifi_sta_disconnect();
+    if (ota_err != ESP_OK) {
         return OTA_RESULT_DOWNLOAD_FAIL;
     }
-    ESP_LOGI(TAG, "Downloaded %d bytes OK", downloaded);
-
-    /* WiFi no longer needed — free radio before write */
-    wifi_sta_disconnect();
-
-    /* ── SHA-256 verify (over the full PSRAM buffer) ─────────── */
-    show_status("Verifying image...", NULL);
-    if (!sha256_verify(fw_buf, fw_size, sha256_hex)) {
-        show_status("SHA-256 mismatch!", "Update aborted");
-        heap_caps_free(fw_buf);
-        return OTA_RESULT_VERIFY_FAIL;
-    }
-    ESP_LOGI(TAG, "SHA-256 verified OK");
-
-    /* ── Write PSRAM → OTA flash partition ───────────────────── */
-    show_status("Installing update...", "Do not power off");
-    if (flash_from_psram(fw_buf, fw_size) != ESP_OK) {
-        show_status("Flash write failed", NULL);
-        heap_caps_free(fw_buf);
-        return OTA_RESULT_FLASH_FAIL;
-    }
-    heap_caps_free(fw_buf);
 
     /* ── Commit version to NVS ───────────────────────────────── */
     nvs_handle_t hv2;

@@ -1,12 +1,10 @@
 /**
  * @file ota_manager.h
- * @brief PSRAM-buffered OTA update manager.
+ * @brief Streaming OTA update manager.
  *
- * Downloads the firmware binary into PSRAM, verifies its SHA-256 hash,
- * then writes the image atomically to the inactive OTA flash partition
- * and reboots.  Because the full image is validated in RAM before any
- * flash write begins, a power-loss during flashing leaves the previous
- * firmware intact.
+ * Downloads the firmware binary in chunks directly into the inactive OTA
+ * flash partition, computing SHA-256 incrementally as each chunk arrives.
+ * No PSRAM or large RAM buffer is required.
  *
  * Expected call sequence (after portal_mode_run has saved credentials):
  *
@@ -41,7 +39,6 @@ typedef enum {
     OTA_RESULT_DOWNLOAD_FAIL,    /**< Firmware binary download failed.       */
     OTA_RESULT_VERIFY_FAIL,      /**< SHA-256 mismatch.                      */
     OTA_RESULT_FLASH_FAIL,       /**< OTA partition write failed.            */
-    OTA_RESULT_NO_PSRAM,         /**< PSRAM unavailable or too small.        */
 } ota_result_t;
 
 /**
