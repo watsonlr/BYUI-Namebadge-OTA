@@ -98,8 +98,7 @@ void app_main(void)
 
     display_init();
     leds_init();
-    /* Startup glow: dim BYUI blue on all LEDs while splash plays. */
-    leds_fill(0, 30, 80);  /* R=0 G=30 B=80 → muted blue */
+    leds_clear();
     leds_show();
     splash_screen_run();
 
