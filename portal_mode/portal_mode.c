@@ -12,11 +12,121 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "driver/gpio.h"
 #include <stdio.h>
 #include <string.h>
 
 #define TAG "portal_mode"
+
+#define BTN_A_GPIO  38   /* Left  / Back    */
+#define BTN_B_GPIO  18   /* Right / Forward */
+
+/* ── WiFi test helpers (used by Step 4 welcome screen) ──────────── */
+#define WIFI_TEST_CONNECTED_BIT  BIT0
+#define WIFI_TEST_FAIL_BIT       BIT1
+#define WIFI_TEST_MAX_RETRIES    3
+#define WIFI_TEST_TIMEOUT_MS     10000
+
+static EventGroupHandle_t  s_test_eg        = NULL;
+static esp_netif_t        *s_test_netif     = NULL;
+static int                 s_test_retries   = 0;
+static uint8_t             s_disconnect_reason = 0;
+
+/* Map ESP-IDF WiFi disconnect reason codes to a short human-readable string. */
+static const char *wifi_reason_str(uint8_t reason)
+{
+    switch (reason) {
+    case 201: return "SSID not found";          /* WIFI_REASON_NO_AP_FOUND       */
+    case 2:   /* AUTH_EXPIRE */
+    case 202: return "Wrong password";          /* WIFI_REASON_AUTH_FAIL         */
+    case 15:  return "Wrong password";          /* WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT */
+    case 203: return "Association failed";      /* WIFI_REASON_ASSOC_FAIL        */
+    case 200: return "Beacon timeout";          /* WIFI_REASON_BEACON_TIMEOUT    */
+    case 67:  return "Connection failed";       /* WIFI_REASON_CONNECTION_FAIL   */
+    case 204: return "Handshake timeout";       /* WIFI_REASON_HANDSHAKE_TIMEOUT */
+    default:  return NULL;                      /* show raw code instead         */
+    }
+}
+
+static void _test_wifi_event_handler(void *arg, esp_event_base_t base,
+                                     int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *ev = (wifi_event_sta_disconnected_t *)data;
+        s_disconnect_reason = ev->reason;
+        ESP_LOGW(TAG, "WiFi disconnect reason: %u", s_disconnect_reason);
+        if (s_test_retries < WIFI_TEST_MAX_RETRIES) {
+            s_test_retries++;
+            esp_wifi_connect();
+        } else {
+            xEventGroupSetBits(s_test_eg, WIFI_TEST_FAIL_BIT);
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(s_test_eg, WIFI_TEST_CONNECTED_BIT);
+    }
+}
+
+/* Try connecting to the saved network; fill ip_out on success. */
+static bool _portal_wifi_test(const char *ssid, const char *pass,
+                               char *ip_out, size_t ip_out_len)
+{
+    s_test_eg = xEventGroupCreate();
+    s_test_retries = 0;
+    s_disconnect_reason = 0;
+
+    s_test_netif = esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
+
+    esp_event_handler_instance_t inst_wifi, inst_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            WIFI_EVENT, ESP_EVENT_ANY_ID, _test_wifi_event_handler, NULL, &inst_wifi));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, _test_wifi_event_handler, NULL, &inst_ip));
+
+    wifi_config_t sta_cfg = {0};
+    strlcpy((char *)sta_cfg.sta.ssid,     ssid, sizeof(sta_cfg.sta.ssid));
+    strlcpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    EventBits_t bits = xEventGroupWaitBits(s_test_eg,
+                                           WIFI_TEST_CONNECTED_BIT | WIFI_TEST_FAIL_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(WIFI_TEST_TIMEOUT_MS));
+
+    bool connected = (bits & WIFI_TEST_CONNECTED_BIT) != 0;
+    if (connected && ip_out) {
+        esp_netif_ip_info_t ip_info;
+        esp_netif_get_ip_info(s_test_netif, &ip_info);
+        snprintf(ip_out, ip_out_len, IPSTR, IP2STR(&ip_info.ip));
+    }
+
+    esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, inst_ip);
+    esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, inst_wifi);
+    vEventGroupDelete(s_test_eg);
+    s_test_eg = NULL;
+
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    if (s_test_netif) {
+        esp_netif_destroy(s_test_netif);
+        s_test_netif = NULL;
+    }
+    return connected;
+}
 
 /* ── Layout constants (320×240 landscape) ───────────────────────── */
 
@@ -164,46 +274,132 @@ bool portal_mode_run(int timeout_s)
     ESP_LOGI(TAG, "Credentials saved — stopping portal");
     wifi_config_stop();
 
-    /* ── Step 4: Welcome screen with the saved badge nickname ── */
-    char nick[33] = {0};
+    /* ── Step 4: Setup Complete screen ─────────────────────────────
+     * Read the saved nickname and credentials, show the screen, then
+     * do a quick WiFi connection test to tell the user whether their
+     * credentials work before OTA takes over.                        */
+    char nick[33]      = {0};
+    char saved_ssid[33] = {0};
+    char saved_pass[65] = {0};
     wifi_config_get_nick(nick, sizeof(nick));
 
-    display_fill(DISPLAY_COLOR_BLACK);
+    nvs_handle_t nh;
+    if (nvs_open_from_partition(WIFI_CONFIG_NVS_PARTITION, WIFI_CONFIG_NVS_NAMESPACE,
+                                NVS_READONLY, &nh) == ESP_OK) {
+        size_t n;
+        n = sizeof(saved_ssid); nvs_get_str(nh, WIFI_CONFIG_NVS_KEY_SSID, saved_ssid, &n);
+        n = sizeof(saved_pass); nvs_get_str(nh, WIFI_CONFIG_NVS_KEY_PASS, saved_pass, &n);
+        nvs_close(nh);
+    }
 
-    /* Green confirmation bar at the top */
-    display_fill_rect(0, 0, DISPLAY_W, 40, DISPLAY_COLOR_GREEN);
+    /* Helper: draw the static portions of the Setup Complete screen */
+    int name_scale = ((int)strlen(nick) * DISPLAY_FONT_W * 3 <= DISPLAY_W) ? 3 : 2;
 
-    display_text_ctx_t hdr = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                          DISPLAY_COLOR_WHITE,
-                                          DISPLAY_COLOR_GREEN);
-    display_print(&hdr, centre_x("Setup Complete!", 2), 4,  "Setup Complete!");
-    display_print(&hdr, centre_x("Welcome to your", 2), 22, "Welcome to your");
+#define _DRAW_SETUP_BG() do { \
+        display_fill(DISPLAY_COLOR_WHITE); \
+        display_text_ctx_t _hdr = DISPLAY_CTX(DISPLAY_FONT_SANS, 2, \
+                                               DISPLAY_COLOR_BLACK, \
+                                               DISPLAY_COLOR_WHITE); \
+        display_print(&_hdr, centre_x("Setup Complete", 2), 20, "Setup Complete"); \
+        display_text_ctx_t _nm = DISPLAY_CTX(DISPLAY_FONT_SANS, name_scale, \
+                                              DISPLAY_COLOR_BLACK, \
+                                              DISPLAY_COLOR_WHITE); \
+        display_print(&_nm, centre_x(nick, name_scale), 60, nick); \
+    } while (0)
 
-    display_text_ctx_t lbl = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                          DISPLAY_COLOR_YELLOW,
-                                          DISPLAY_COLOR_BLACK);
-    display_print(&lbl, centre_x("eBadge!", 2), 52, "eBadge!");
+    /* Configure Back/Forward buttons (low-active with internal pull-up). */
+    {
+        gpio_config_t bc = {
+            .pin_bit_mask = (1ULL << BTN_A_GPIO) | (1ULL << BTN_B_GPIO),
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&bc);
+    }
 
-    /* Badge nickname — scale 3 if it fits, else scale 2 */
-    int name_scale = (strlen(nick) * DISPLAY_FONT_W * 3 <= DISPLAY_W) ? 3 : 2;
-    display_text_ctx_t name_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, name_scale,
-                                               DISPLAY_COLOR_WHITE,
-                                               DISPLAY_COLOR_BLACK);
-    display_print(&name_ctx,
-                  centre_x(nick, name_scale),
-                  90, nick);
+    /* Test WiFi; loop so the user can retry with Back or skip with Forward. */
+    char ip_str[20] = {0};
+    do {
+        /* Show "Connecting to WiFi..." while the test runs */
+        ip_str[0] = '\0';
+        _DRAW_SETUP_BG();
+        {
+            display_text_ctx_t wc = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
+                                                 DISPLAY_COLOR_BLACK,
+                                                 DISPLAY_COLOR_WHITE);
+            display_print(&wc, centre_x("Connecting to WiFi...", 1), 130,
+                          "Connecting to WiFi...");
+        }
 
-    display_text_ctx_t info = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
-                                           DISPLAY_COLOR_CYAN,
-                                           DISPLAY_COLOR_BLACK);
-    display_print(&info, centre_x("Connecting to Wi-Fi...", 1), 150,
-                  "Connecting to Wi-Fi...");
-    display_print(&info, centre_x("Checking for updates.", 1), 164,
-                  "Checking for updates.");
-    display_print(&info, centre_x("This may take a moment.", 1), 178,
-                  "This may take a moment.");
+        bool connected = (saved_ssid[0] != '\0') &&
+                         _portal_wifi_test(saved_ssid, saved_pass,
+                                           ip_str, sizeof(ip_str));
+        _DRAW_SETUP_BG();
 
-    vTaskDelay(pdMS_TO_TICKS(3000));
+        if (connected) {
+            display_text_ctx_t ok = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                                 DISPLAY_COLOR_GREEN,
+                                                 DISPLAY_COLOR_WHITE);
+            display_print(&ok, centre_x("WiFi Connected", 2), 125,
+                          "WiFi Connected");
+            display_text_ctx_t ip_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
+                                                     DISPLAY_COLOR_GREEN,
+                                                     DISPLAY_COLOR_WHITE);
+            display_print(&ip_ctx, centre_x(ip_str, 1), 148, ip_str);
+            ESP_LOGI(TAG, "WiFi test: connected (%s)", ip_str);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            break;
+        }
+
+        /* ── Failure screen ─────────────────────────────────────── */
+        const char *reason = wifi_reason_str(s_disconnect_reason);
+        char reason_buf[24];
+        if (!reason) {
+            snprintf(reason_buf, sizeof(reason_buf), "Error code: %u",
+                     s_disconnect_reason);
+            reason = reason_buf;
+        }
+        ESP_LOGW(TAG, "WiFi test failed: %s", reason);
+
+        /* "WiFi NOT Connected" — scale 2 (large, red) */
+        display_text_ctx_t err = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                              DISPLAY_COLOR_RED,
+                                              DISPLAY_COLOR_WHITE);
+        display_print(&err, centre_x("WiFi NOT Connected", 2), 100,
+                      "WiFi NOT Connected");
+
+        /* Reason — scale 1, red, below heading */
+        display_text_ctx_t rsn = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
+                                              DISPLAY_COLOR_RED,
+                                              DISPLAY_COLOR_WHITE);
+        display_print(&rsn, centre_x(reason, 1), 122, reason);
+
+        /* Button hints */
+        display_text_ctx_t hint = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
+                                               DISPLAY_COLOR_BLACK,
+                                               DISPLAY_COLOR_WHITE);
+        display_print(&hint, 4, 165, "<- Back button to re-try");
+        display_print(&hint, 4, 179, "-> FWD button to continue");
+
+        /* Wait for Back (A) or Forward (B) */
+        while (gpio_get_level(BTN_A_GPIO) != 0 && gpio_get_level(BTN_B_GPIO) != 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        bool retry = (gpio_get_level(BTN_A_GPIO) == 0);
+        /* Wait for release (debounce) */
+        while (gpio_get_level(BTN_A_GPIO) == 0 || gpio_get_level(BTN_B_GPIO) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (!retry) {
+            ESP_LOGI(TAG, "Forward pressed — continuing without WiFi");
+            break;   /* user chose to skip */
+        }
+        ESP_LOGI(TAG, "Back pressed — retrying WiFi");
+    } while (true);
+
+#undef _DRAW_SETUP_BG
 
     return true;
 }

@@ -320,4 +320,99 @@ This completely disables the CMake Tools extension for the workspace (ESP-IDF ha
 
 Earlier mitigations (`configureOnOpen: false`, `automaticReconfigure: false`, `configureOnEdit: false`) were insufficient — the extension still activated. `cmake.enabled: false` is the definitive fix.
 
+When the error persisted even with `cmake.enabled: false`, the Espressif-bundled cmake was found at `C:\Espressif\tools\cmake\3.24.0\bin\cmake.exe` and set explicitly:
+```json
+"cmake.cmakePath": "C:/Espressif/tools/cmake/3.24.0/bin/cmake.exe"
+```
+
 **Files changed:** `.vscode/settings.json`
+
+---
+
+### OTA — PSRAM failure diagnosis
+After submitting the portal form the display showed **"OTA: no PSRAM"** on every attempt.
+
+**Root cause:** ESP32-S3 rev 0.2 silicon errata. The boot log showed:
+
+```
+E (344) octal_psram: PSRAM ID read error: 0x00000000
+```
+
+The chip reports 0 bytes of PSRAM from `esp_psram_get_size()`. `CONFIG_SPIRAM_IGNORE_NOTFOUND=y` allows the app to continue booting. Changing `CONFIG_SPIRAM_SPEED` from 80 MHz → 40 MHz (built and flashed) made no difference — the core issue is not clock speed but a hardware initialisation failure in this silicon revision.
+
+**Result:** PSRAM is physically present (esptool identifies "Embedded PSRAM 2MB (AP_3v3)") but is never usable at runtime on this particular board.
+
+---
+
+### OTA — Rewrite: PSRAM-buffered → streaming-to-flash
+
+The original architecture allocated the full firmware image in PSRAM before flashing. Since PSRAM is unavailable on this board, the OTA manager was redesigned to stream directly to flash with no large RAM buffer.
+
+**New architecture:**
+
+1. Connect to WiFi STA.
+2. Fetch JSON manifest → parse `version`, `url`, `size`, `sha256`.
+3. Compare `version` against stored `ota_ver` in NVS; skip if up-to-date.
+4. Verify image fits in the inactive OTA partition.
+5. Open OTA partition with `esp_ota_begin()`.
+6. Open HTTP connection; read in 8 KB chunks (`s_ota_chunk[8192]`, static / BSS).
+7. Each chunk: `mbedtls_sha256_update()` + `esp_ota_write()`.
+8. After final chunk: `mbedtls_sha256_finish()` → compare hex string.
+9. On SHA mismatch: `esp_ota_abort()`; display "SHA-256 mismatch!".
+10. On success: `esp_ota_end()` → `esp_ota_set_boot_partition()` → commit new version to NVS → reboot.
+
+Display shows `"Downloading..."` with `"%% (KB)"` progress updated every 5%.
+
+**Key changes in `ota_manager.c`:**
+- Removed `#include "esp_psram.h"` and `#include "esp_heap_caps.h"`
+- Removed functions `http_download_firmware()`, `sha256_verify()`, `flash_from_psram()`
+- Added `#define OTA_CHUNK_SIZE 8192`, `static uint8_t s_ota_chunk[OTA_CHUNK_SIZE]`
+- New function `http_stream_and_flash(url, expected_size, sha256_expected)`
+- `ota_manager_run()`: removed PSRAM check, PSRAM size check, malloc block; replaced three-step download/verify/flash sequence with single `http_stream_and_flash()` call
+
+**Key changes in `ota_manager.h`:**
+- Description updated: "PSRAM-buffered OTA" → "Streaming OTA update manager"
+- `OTA_RESULT_NO_PSRAM` removed from `ota_result_t` enum
+
+**Files changed:** `ota_manager/ota_manager.c`, `ota_manager/include/ota_manager.h`
+
+---
+
+### Portal — Setup Complete screen redesign
+
+The Step 4 "welcome" screen after form submission was redesigned:
+
+**Before:** Black background, green header bar ("Setup Complete!" / "Welcome to your"), yellow "eBadge!" text, white nickname, cyan info lines ("Connecting to Wi-Fi…" etc.), 3-second static delay.
+
+**After:** White background, clean layout, live WiFi connection test with status feedback:
+- "Setup Complete" — black text, scale 2, centred near top
+- Badge nickname — black, scale 2 or 3, centred
+- "Connecting to WiFi..." shown while connection is attempted (up to 10 s)
+- On success: **"WiFi Connected"** (green, scale 2) + IP address below (green, scale 1)
+- On failure: **"WiFi NOT Connected"** (red, scale 2) + failure reason (red, scale 1) + button prompts (black, scale 1):
+  - `"<- Back button to re-try"`
+  - `"-> FWD button to continue"`
+
+**Button behaviour on failure:**
+- **Button A (GPIO 38 / Back / Left):** re-runs the WiFi test with saved credentials — can retry indefinitely
+- **Button B (GPIO 18 / Forward / Right):** skips WiFi check and continues; OTA will later return "no WiFi" gracefully
+
+**WiFi failure reasons mapped to human-readable strings:**
+
+| Reason code | Message |
+|------------|---------|
+| 201 | SSID not found |
+| 2 / 202 | Wrong password |
+| 15 | Wrong password |
+| 203 | Association failed |
+| 200 | Beacon timeout |
+| 67 | Connection failed |
+| 204 | Handshake timeout |
+| other | Error code: N |
+
+The disconnect reason code is captured from `WIFI_EVENT_STA_DISCONNECTED` event data (`wifi_event_sta_disconnected_t.reason`) in the test event handler. The last reason seen before giving up is stored in `s_disconnect_reason`.
+
+The WiFi test (connect → get IP → disconnect) runs fully inline in `portal_mode_run()` after `wifi_config_stop()`. After the screen delay (or button press), `ota_manager_run()` reconnects independently.
+
+**Files changed:** `portal_mode/portal_mode.c`
+
