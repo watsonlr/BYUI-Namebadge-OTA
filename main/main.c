@@ -96,8 +96,7 @@ static void run_factory_loader(void)
     display_init();
     leds_init();
 
-    /* Startup glow: dim BYUI blue while splash plays. */
-    leds_fill(0, 30, 80);
+    leds_clear();
     leds_show();
 
     splash_screen_run();
