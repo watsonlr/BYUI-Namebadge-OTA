@@ -3,148 +3,149 @@
 #include "esp_log.h"
 #include "esp_psram.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
-#include "driver/gpio.h"
+
+#include "buttons.h"
 #include "display.h"
 #include "splash_screen.h"
 #include "portal_mode.h"
-#include "ota_manager.h"
 #include "wifi_config.h"
+#include "loader_menu.h"
 #include "leds.h"
 
-#include <stdio.h>
-#include <string.h>
+#define TAG "factory_loader"
 
-#define TAG "main"
-
-#define BTN_A_GPIO  38
-#define BTN_B_GPIO  18
-/* Both buttons must be held this long to trigger a factory reset. */
-#define RESET_HOLD_MS   2000
-#define RESET_POLL_MS   50
-
-/* Show a simple welcome screen with the saved badge nickname. */
-static void show_welcome(const char *nick)
-{
-    display_fill(DISPLAY_COLOR_WHITE);
-
-    display_text_ctx_t ctx_lbl = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                              DISPLAY_COLOR_BLUE,
-                                              DISPLAY_COLOR_WHITE);
-    display_text_ctx_t ctx_name = DISPLAY_CTX(DISPLAY_FONT_SANS, 3,
-                                               DISPLAY_COLOR_BLACK,
-                                               DISPLAY_COLOR_WHITE);
-
-    /* "Welcome:" centred at ~y=90 */
-    const char *lbl = "Welcome:";
-    int lbl_x = (DISPLAY_W - (int)strlen(lbl) * DISPLAY_FONT_W * 2) / 2;
-    display_print(&ctx_lbl, lbl_x, 90, lbl);
-
-    /* Badge nickname centred below, scale 3 (24 px tall) */
-    int name_w = (int)strlen(nick) * DISPLAY_FONT_W * 3;
-    int name_x = (DISPLAY_W - name_w) / 2;
-    if (name_x < 0) name_x = 0;
-    display_print(&ctx_name, name_x, 118, nick);
-}
-
+/* ── Boot-time A+B detection ───────────────────────────────────────── */
 /*
- * Poll for A+B held simultaneously for RESET_HOLD_MS.
- * Returns true if the combo was detected; false if the window expired.
+ * Poll A+B for up to LOADER_HOLD_MS before touching any other peripheral.
+ * The check must complete within ~200 ms so normal student-app launches feel
+ * instant.  Both buttons must be held simultaneously for the full window;
+ * releasing either button aborts the check immediately (returns false).
  */
-static bool wait_for_reset_combo(int window_ms)
+#define LOADER_HOLD_MS  150
+
+/* ── Student-app launch ────────────────────────────────────────────── */
+/*
+ * Find the first OTA slot that contains a valid firmware image and boot into
+ * it.  Returns false if no valid student app is installed (caller falls
+ * through to loader mode).
+ *
+ * When this function finds a valid app it calls esp_restart() and never
+ * returns.  The ESP-IDF second-stage bootloader then loads the OTA partition
+ * directly.  To re-enter the factory loader the user holds A+B at power-on,
+ * which is handled by the student app (a separate concern) or by performing
+ * a "Reset to blank canvas" from this loader.
+ */
+static bool try_launch_student_app(void)
 {
-    /* Configure both pins as inputs with internal pull-ups. */
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << BTN_A_GPIO) | (1ULL << BTN_B_GPIO),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+    /* Walk ota_0 → ota_1 → ota_2 (whichever partitions exist). */
+    const esp_partition_subtype_t ota_subtypes[] = {
+        ESP_PARTITION_SUBTYPE_APP_OTA_0,
+        ESP_PARTITION_SUBTYPE_APP_OTA_1,
+        ESP_PARTITION_SUBTYPE_APP_OTA_2,
     };
-    gpio_config(&cfg);
 
-    int held_ms    = 0;
-    int elapsed_ms = 0;
-
-    while (elapsed_ms < window_ms) {
-        bool a_pressed = (gpio_get_level(BTN_A_GPIO) == 0);
-        bool b_pressed = (gpio_get_level(BTN_B_GPIO) == 0);
-
-        if (a_pressed && b_pressed) {
-            held_ms += RESET_POLL_MS;
-            if (held_ms >= RESET_HOLD_MS) {
-                return true;
-            }
-        } else {
-            held_ms = 0;   /* reset counter if either button released */
+    /* Prefer the partition that otadata already says is active. */
+    const esp_partition_t *preferred = esp_ota_get_boot_partition();
+    if (preferred &&
+        preferred->subtype != ESP_PARTITION_SUBTYPE_APP_FACTORY) {
+        esp_app_desc_t desc;
+        if (esp_ota_get_partition_description(preferred, &desc) == ESP_OK) {
+            ESP_LOGI(TAG, "Launching preferred OTA app: %s %s",
+                     desc.project_name, desc.version);
+            esp_ota_set_boot_partition(preferred);
+            esp_restart();
+            /* never reached */
         }
-
-        vTaskDelay(pdMS_TO_TICKS(RESET_POLL_MS));
-        elapsed_ms += RESET_POLL_MS;
     }
+
+    /* Fall back: scan all OTA slots for any valid image. */
+    for (int i = 0; i < (int)(sizeof(ota_subtypes) / sizeof(ota_subtypes[0])); i++) {
+        const esp_partition_t *part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ota_subtypes[i], NULL);
+        if (!part) continue;
+
+        esp_app_desc_t desc;
+        if (esp_ota_get_partition_description(part, &desc) == ESP_OK) {
+            ESP_LOGI(TAG, "Launching OTA app from slot %d: %s %s",
+                     i, desc.project_name, desc.version);
+            esp_ota_set_boot_partition(part);
+            esp_restart();
+            /* never reached */
+        }
+    }
+
+    ESP_LOGW(TAG, "No valid student app found in OTA slots");
     return false;
 }
 
-void app_main(void)
+/* ── Factory loader full initialisation ────────────────────────────── */
+
+static void run_factory_loader(void)
 {
-    size_t psram_size = esp_psram_get_size();
-    if (psram_size > 0) {
-        ESP_LOGI(TAG, "PSRAM: %u bytes available", (unsigned)psram_size);
+    /* Log PSRAM availability (informational). */
+    size_t psram = esp_psram_get_size();
+    if (psram > 0) {
+        ESP_LOGI(TAG, "PSRAM: %u bytes", (unsigned)psram);
     } else {
-        ESP_LOGW(TAG, "PSRAM: not available");
+        ESP_LOGW(TAG, "PSRAM not available");
     }
 
     nvs_flash_init();
-
     display_init();
     leds_init();
-    /* Startup glow: dim BYUI blue on all LEDs while splash plays. */
-    leds_fill(0, 30, 80);  /* R=0 G=30 B=80 → muted blue */
+
+    /* Startup glow: dim BYUI blue while splash plays. */
+    leds_fill(0, 30, 80);
     leds_show();
+
     splash_screen_run();
 
-    if (wifi_config_is_configured()) {
-        /* Badge already set up — read nick and show welcome screen. */
-        char nick[33] = {0};
-        wifi_config_get_nick(nick, sizeof(nick));
-        ESP_LOGI(TAG, "Already configured — nick='%s', skipping portal", nick);
-        show_welcome(nick);
-
-        /* Give the user a 5-second window to hold A+B for a factory reset. */
-        display_text_ctx_t hint = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
-                                               DISPLAY_COLOR_BLUE,
-                                               DISPLAY_COLOR_WHITE);
-        const char *hint_str = "Press A & B to reconfig";
-        int hx = (DISPLAY_W - (int)strlen(hint_str) * DISPLAY_FONT_W) / 2;
-        display_print(&hint, hx, 220, hint_str);
-
-        if (wait_for_reset_combo(5000)) {
-            ESP_LOGW(TAG, "A+B held — erasing user config and rebooting");
-
-            display_fill(DISPLAY_COLOR_BLACK);
-            display_text_ctx_t ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
-                                                  DISPLAY_COLOR_RED,
-                                                  DISPLAY_COLOR_BLACK);
-            display_print(&ctx, 44, 104, "Config erased.");
-            display_print(&ctx, 68, 124, "Rebooting...");
-            vTaskDelay(pdMS_TO_TICKS(1500));
-
-            nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
-            esp_restart();
-        }
+    /* Run WiFi configuration portal if the badge is not yet configured. */
+    if (!wifi_config_is_configured()) {
+        ESP_LOGI(TAG, "Not configured — launching portal");
+        portal_mode_run(0);   /* blocks until user submits credentials */
     } else {
-        /* First boot (or data erased) — run the configuration portal. */
-        portal_mode_run(0);  /* 0 = wait forever for the user to submit */
+        ESP_LOGI(TAG, "Already configured — entering loader menu");
     }
 
-    /* Connect to the saved network, check manifest, update if newer. */
-    ota_result_t ota_r = ota_manager_run();
-    if (ota_r != OTA_RESULT_UP_TO_DATE && ota_r != OTA_RESULT_UPDATED) {
-        ESP_LOGW(TAG, "OTA check failed: %d", (int)ota_r);
-    }
-    /* OTA_RESULT_UPDATED never reaches here — device already rebooted. */
+    /* Hand off to the interactive loader menu. */
+    loader_menu_run();
 
-    while (1) {
-        vTaskDelay(portMAX_DELAY);
+    /* loader_menu_run() loops forever; this point is never reached. */
+}
+
+/* ── Entry point ───────────────────────────────────────────────────── */
+
+void app_main(void)
+{
+    /*
+     * Stage 1 — quick button check (before any peripheral init).
+     *
+     * buttons_init() only configures GPIO — it is safe to call here.
+     * If A+B are held for LOADER_HOLD_MS we enter the factory loader.
+     * Otherwise we attempt to boot the installed student app immediately.
+     */
+    buttons_init();
+
+    bool enter_loader = buttons_held(BTN_A | BTN_B, LOADER_HOLD_MS);
+
+    if (!enter_loader) {
+        /* Try to hand off to a student app.  Falls through if none exists. */
+        if (try_launch_student_app()) {
+            /* try_launch_student_app() only returns false — never true. */
+        }
+        /* No student app installed → fall into the loader automatically. */
+        ESP_LOGI(TAG, "No student app — entering factory loader");
+    } else {
+        ESP_LOGI(TAG, "A+B held — entering factory loader");
     }
+
+    /*
+     * Stage 2 — factory loader.
+     *
+     * Reached when: A+B held at boot, OR no valid student app installed.
+     */
+    run_factory_loader();
 }
