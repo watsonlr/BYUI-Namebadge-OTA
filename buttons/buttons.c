@@ -72,7 +72,7 @@ bool buttons_held(button_t mask, uint32_t duration_ms)
 button_t buttons_wait_press(uint32_t timeout_ms)
 {
     TickType_t start = xTaskGetTickCount();
-    button_t   last  = BTN_NONE;
+    button_t   last  = buttons_read();  /* snapshot so always-LOW pins don't fire */
 
     for (;;) {
         /* Timeout check */

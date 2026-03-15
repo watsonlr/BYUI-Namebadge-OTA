@@ -110,7 +110,7 @@ static void draw_menu(int selected)
     for (int i = 0; i < NUM_ITEMS; i++) {
         draw_item(i, i == selected);
     }
-    draw_footer("Up/Dn:move   A/Rt:select");
+    draw_footer("B:move   A:select");
 }
 
 /* ── Info / stub screens ───────────────────────────────────────────── */
@@ -459,8 +459,12 @@ static void action_reset_namebadge(void)
 
 void loader_menu_run(void)
 {
-    /* Drain any buttons still physically held (boot press, portal exit, etc.) */
-    while (buttons_read() != BTN_NONE) {
+    /* Re-initialise GPIOs — peripheral init (SPI, RMT) can clear pull-up
+     * configuration set by the early buttons_init() in app_main(). */
+    buttons_init();
+
+    /* Drain A+B specifically — those are the entry combo and may still be held. */
+    while (buttons_read() & (BTN_A | BTN_B)) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 
@@ -477,7 +481,7 @@ void loader_menu_run(void)
             continue;
         }
 
-        if (btn & BTN_DOWN) {
+        if (btn & (BTN_DOWN | BTN_B)) {
             selection = (selection + 1) % NUM_ITEMS;
             draw_menu(selection);
             continue;
@@ -501,6 +505,5 @@ void loader_menu_run(void)
 
             draw_menu(selection);
         }
-        /* BTN_B ignored at top level — no parent menu */
     }
 }
