@@ -128,6 +128,21 @@ void display_draw_string(int x, int y, const char *str,
 void display_print(const display_text_ctx_t *ctx, int x, int y, const char *str);
 
 /**
+ * @brief Draw a w×h bitmap at pixel position (x, y).
+ *
+ * Pixels must already be in ILI9341 wire byte-order (big-endian RGB565),
+ * the format produced by png_to_icon.py.  The entire window is set once;
+ * rows are transmitted sequentially — no runtime conversion is needed.
+ *
+ * @param x       Left edge in pixels.
+ * @param y       Top edge in pixels.
+ * @param w       Image width in pixels.
+ * @param h       Image height in pixels.
+ * @param pixels  Pointer to w×h uint16_t values in wire byte-order.
+ */
+void display_draw_bitmap(int x, int y, int w, int h, const uint16_t *pixels);
+
+/**
  * @brief Write one horizontal strip of pixels at position (x, y).
  *
  * Pixels must already be in ILI9341 wire byte-order (big-endian RGB565,

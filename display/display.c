@@ -524,6 +524,19 @@ void display_print(const display_text_ctx_t *ctx, int x, int y, const char *str)
     }
 }
 
+void display_draw_bitmap(int x, int y, int w, int h, const uint16_t *pixels)
+{
+    if (w <= 0 || h <= 0 || !pixels) return;
+    if (x < 0 || y < 0 || x + w > DISPLAY_W || y + h > DISPLAY_H) return;
+
+    /* Set the address window once; ILI9341 auto-advances after each row. */
+    set_window((uint16_t)x, (uint16_t)y,
+               (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+    for (int row = 0; row < h; row++) {
+        write_pixels((const uint8_t *)(pixels + row * w), w * 2);
+    }
+}
+
 void display_draw_row_raw(int x, int y, int w, const uint16_t *pixels)
 {
     set_window((uint16_t)x, (uint16_t)y,

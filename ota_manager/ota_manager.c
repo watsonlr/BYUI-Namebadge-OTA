@@ -1,18 +1,23 @@
 /**
  * @file ota_manager.c
- * @brief PSRAM-buffered OTA update manager.
+ * @brief Multi-app OTA catalog manager.
  *
  * Flow:
- *   1. Read WiFi credentials + manifest URL from NVS.
- *   2. Connect to the saved AP (STA mode).
- *   3. Fetch the JSON manifest → parse version / URL / size / sha256.
- *   4. Compare manifest version against last installed version (NVS).
- *   5. Allocate the full firmware image in PSRAM.
- *   6. HTTP-stream the binary directly into the PSRAM buffer.
- *   7. Disconnect WiFi (flash SPI is independent of the radio).
- *   8. Verify SHA-256 over the PSRAM buffer.
- *   9. Write the image to the inactive OTA partition in one call.
- *  10. Mark the partition bootable, store new version, reboot.
+ *   1. ota_manager_fetch_catalog()
+ *      a. Read WiFi credentials + manifest URL from NVS.
+ *      b. Connect to the saved AP (STA mode).
+ *      c. Fetch the JSON manifest (bare array of app objects).
+ *      d. Parse up to OTA_CATALOG_MAX entries.
+ *      e. Return OTA_RESULT_OK with catalog populated; WiFi stays up.
+ *
+ *   2. Caller presents the catalog to the user (loader_menu).
+ *
+ *   3. ota_manager_flash_app(selected_entry)
+ *      a. Stream firmware binary in 8 KB chunks to inactive OTA partition.
+ *      b. Verify SHA-256 incrementally.
+ *      c. Mark partition bootable, reboot — never returns on success.
+ *
+ *   4. ota_manager_wifi_disconnect()  — call when done (or on cancel).
  */
 
 #include "ota_manager.h"
@@ -20,6 +25,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -37,19 +43,18 @@
 
 #include "mbedtls/sha256.h"
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 
 #include "display.h"
 
 #define TAG "ota_manager"
 
 /* ── NVS ──────────────────────────────────────────────────────────── */
-/* Read/write the same dedicated user_data partition used by wifi_config. */
 #define NVS_PARTITION  "user_data"
 #define NVS_NAMESPACE  "badge_cfg"
 #define NVS_KEY_SSID   "ssid"
 #define NVS_KEY_PASS   "pass"
 #define NVS_KEY_MFST   "mfst"
-#define NVS_KEY_OTAVER "ota_ver"   /* uint32 — last installed manifest ver */
 
 /* ── WiFi STA ─────────────────────────────────────────────────────── */
 #define WIFI_CONNECTED_BIT  BIT0
@@ -61,7 +66,7 @@ static EventGroupHandle_t s_wifi_eg   = NULL;
 static esp_netif_t       *s_sta_netif = NULL;
 static int                s_retries   = 0;
 
-/* ── display helper ───────────────────────────────────────────────── */
+/* ── Display helper ───────────────────────────────────────────────── */
 static void show_status(const char *line1, const char *line2)
 {
     display_fill(DISPLAY_COLOR_BLACK);
@@ -185,13 +190,53 @@ static esp_err_t http_get_text(const char *url, char *out, size_t out_max,
     return total > 0 ? ESP_OK : ESP_FAIL;
 }
 
+/* ── HTTP: fetch binary resource (icon data) ─────────────────────── */
+static esp_err_t http_get_binary(const char *url, uint8_t *out, size_t out_max,
+                                  int *out_len)
+{
+    esp_http_client_config_t cfg = {
+        .url               = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms        = 15000,
+        .max_redirection_count = 3,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return ESP_FAIL;
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        esp_http_client_cleanup(client);
+        return err;
+    }
+
+    esp_http_client_fetch_headers(client);
+    if (esp_http_client_get_status_code(client) != 200) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+
+    int total = 0;
+    while (total < (int)out_max) {
+        int n = esp_http_client_read(client, (char *)out + total,
+                                     (int)out_max - total);
+        if (n < 0) { err = ESP_FAIL; break; }
+        if (n == 0) break;
+        total += n;
+    }
+    *out_len = total;
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return total > 0 ? ESP_OK : ESP_FAIL;
+}
+
 /* ── Stream firmware from HTTP directly into OTA flash partition ──── *
  *
  * Downloads in 8 KB chunks, hashes incrementally with SHA-256, and
- * writes each chunk to the inactive OTA partition as it arrives.
- * No PSRAM or large RAM buffer required.                              */
+ * writes each chunk to the inactive OTA partition as it arrives.    */
 #define OTA_CHUNK_SIZE 8192
-static uint8_t s_ota_chunk[OTA_CHUNK_SIZE];   /* static → BSS, not stack */
+static uint8_t s_ota_chunk[OTA_CHUNK_SIZE];  /* static → BSS, not stack */
 
 static esp_err_t http_stream_and_flash(const char *url, int expected_size,
                                         const char *sha256_expected)
@@ -233,7 +278,7 @@ static esp_err_t http_stream_and_flash(const char *url, int expected_size,
         return ESP_FAIL;
     }
 
-    /* SHA-256 context — hashed incrementally as chunks arrive */
+    /* SHA-256 hashed incrementally as chunks arrive */
     mbedtls_sha256_context sha_ctx;
     mbedtls_sha256_init(&sha_ctx);
     mbedtls_sha256_starts(&sha_ctx, 0);
@@ -278,7 +323,7 @@ static esp_err_t http_stream_and_flash(const char *url, int expected_size,
         return ESP_FAIL;
     }
 
-    /* Verify SHA-256 over the received data */
+    /* Verify SHA-256 */
     uint8_t hash[32];
     mbedtls_sha256_finish(&sha_ctx, hash);
     mbedtls_sha256_free(&sha_ctx);
@@ -311,18 +356,70 @@ static esp_err_t http_stream_and_flash(const char *url, int expected_size,
 /* ═══════════════════════════════════════════════════════════════════
  *  Public API
  * ══════════════════════════════════════════════════════════════════ */
-ota_result_t ota_manager_run(void)
+
+void ota_manager_wifi_disconnect(void)
 {
-    /* ── Read NVS credentials ─────────────────────────────────── */
-    /* Ensure the user_data partition is mounted (idempotent). */
+    wifi_sta_disconnect();
+}
+
+/* ── Fetch icon ───────────────────────────────────────────────────── */
+
+uint16_t *ota_manager_fetch_icon(const char *url)
+{
+    if (!url || url[0] == '\0') return NULL;
+
+    size_t nbytes = OTA_ICON_BYTES;
+
+    /* Prefer PSRAM; fall back to internal heap if PSRAM is unavailable. */
+    uint16_t *buf = heap_caps_malloc(nbytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = malloc(nbytes);
+    }
+    if (!buf) {
+        ESP_LOGE(TAG, "Icon alloc failed (%zu B)", nbytes);
+        return NULL;
+    }
+
+    int received = 0;
+    esp_err_t err = http_get_binary(url, (uint8_t *)buf, nbytes, &received);
+    if (err != ESP_OK || received != (int)nbytes) {
+        ESP_LOGE(TAG, "Icon fetch: got %d of %d bytes from %s",
+                 received, (int)nbytes, url);
+        free(buf);
+        return NULL;
+    }
+
+    ESP_LOGI(TAG, "Icon fetched: %d B", received);
+    return buf;
+}
+
+/* ── Fetch catalog ────────────────────────────────────────────────── */
+
+ota_result_t ota_manager_fetch_catalog(ota_catalog_t *out)
+{
+    out->count = 0;
+
+    /* Init netif / event loop — safe to call even if already done. */
+    esp_err_t e = esp_netif_init();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_netif_init: %s", esp_err_to_name(e));
+        return OTA_RESULT_NO_WIFI;
+    }
+    e = esp_event_loop_create_default();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_event_loop_create_default: %s", esp_err_to_name(e));
+        return OTA_RESULT_NO_WIFI;
+    }
+
+    /* Mount user_data NVS partition (idempotent). */
     esp_err_t ue = nvs_flash_init_partition(NVS_PARTITION);
     if (ue == ESP_ERR_NVS_NO_FREE_PAGES || ue == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase_partition(NVS_PARTITION);
         nvs_flash_init_partition(NVS_PARTITION);
     }
 
-    char ssid[33]     = {0};
-    char pass[65]     = {0};
+    char ssid[33]      = {0};
+    char pass[65]      = {0};
     char mfst_url[129] = {0};
 
     nvs_handle_t h;
@@ -338,24 +435,15 @@ ota_result_t ota_manager_run(void)
     nvs_close(h);
 
     if (ssid[0] == '\0') {
-        ESP_LOGW(TAG, "No WiFi SSID in NVS — skipping OTA");
+        ESP_LOGW(TAG, "No WiFi SSID configured");
         return OTA_RESULT_NO_WIFI;
     }
     if (mfst_url[0] == '\0') {
-        ESP_LOGW(TAG, "No manifest URL in NVS — skipping OTA");
+        ESP_LOGW(TAG, "No manifest URL configured");
         return OTA_RESULT_NO_MANIFEST;
     }
 
-    /* ── Read last installed version ──────────────────────────── */
-    uint32_t installed_ver = 0;
-    nvs_handle_t hv;
-    if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE,
-                                NVS_READONLY, &hv) == ESP_OK) {
-        nvs_get_u32(hv, NVS_KEY_OTAVER, &installed_ver);
-        nvs_close(hv);
-    }
-
-    /* ── Connect to WiFi ──────────────────────────────────────── */
+    /* Connect to WiFi */
     show_status("Connecting to WiFi...", ssid);
     ESP_LOGI(TAG, "Connecting to SSID: %s", ssid);
 
@@ -367,10 +455,10 @@ ota_result_t ota_manager_run(void)
     }
     ESP_LOGI(TAG, "WiFi connected");
 
-    /* ── Fetch manifest ───────────────────────────────────────── */
-    show_status("Checking for updates...", NULL);
+    /* Fetch manifest JSON */
+    show_status("Fetching app catalog...", NULL);
 
-    static char manifest_json[512];
+    static char manifest_json[4096];
     int manifest_len = 0;
     if (http_get_text(mfst_url, manifest_json, sizeof(manifest_json),
                       &manifest_len) != ESP_OK) {
@@ -379,9 +467,9 @@ ota_result_t ota_manager_run(void)
         wifi_sta_disconnect();
         return OTA_RESULT_NO_MANIFEST;
     }
-    ESP_LOGI(TAG, "Manifest (%d B): %s", manifest_len, manifest_json);
+    ESP_LOGI(TAG, "Manifest (%d B) fetched", manifest_len);
 
-    /* ── Parse manifest JSON ──────────────────────────────────── */
+    /* Parse manifest — expected format: bare JSON array */
     cJSON *root = cJSON_Parse(manifest_json);
     if (!root) {
         ESP_LOGE(TAG, "Manifest JSON parse error");
@@ -390,80 +478,110 @@ ota_result_t ota_manager_run(void)
         return OTA_RESULT_NO_MANIFEST;
     }
 
-    cJSON *j_ver  = cJSON_GetObjectItem(root, "version");
-    cJSON *j_url  = cJSON_GetObjectItem(root, "url");
-    cJSON *j_size = cJSON_GetObjectItem(root, "size");
-    cJSON *j_sha  = cJSON_GetObjectItem(root, "sha256");
-
-    if (!cJSON_IsNumber(j_ver) || !cJSON_IsString(j_url) ||
-        !cJSON_IsNumber(j_size) || !cJSON_IsString(j_sha)) {
-        ESP_LOGE(TAG, "Manifest missing required fields");
-        show_status("Manifest invalid", NULL);
+    /* Support both bare array [ {...}, ... ] and object { "apps": [...] } */
+    cJSON *arr = root;
+    if (cJSON_IsObject(root)) {
+        arr = cJSON_GetObjectItem(root, "apps");
+    }
+    if (!cJSON_IsArray(arr)) {
+        ESP_LOGE(TAG, "Manifest is not an array (and has no 'apps' array)");
+        show_status("Manifest format error", NULL);
         cJSON_Delete(root);
         wifi_sta_disconnect();
         return OTA_RESULT_NO_MANIFEST;
     }
 
-    uint32_t manifest_ver = (uint32_t)j_ver->valuedouble;
-    int      fw_size      = (int)j_size->valuedouble;
+    int parsed = 0;
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, arr) {
+        if (parsed >= OTA_CATALOG_MAX) break;
 
-    /* Copy strings out before cJSON_Delete */
-    char fw_url[257]    = {0};
-    char sha256_hex[65] = {0};
-    strlcpy(fw_url,    j_url->valuestring, sizeof(fw_url));
-    strlcpy(sha256_hex, j_sha->valuestring, sizeof(sha256_hex));
+        cJSON *j_name = cJSON_GetObjectItem(item, "name");
+        cJSON *j_ver  = cJSON_GetObjectItem(item, "version");
+        cJSON *j_url  = cJSON_GetObjectItem(item, "url");
+        cJSON *j_size = cJSON_GetObjectItem(item, "size");
+        cJSON *j_sha  = cJSON_GetObjectItem(item, "sha256");
+
+        /* name is optional; others are required */
+        if (!cJSON_IsString(j_url) ||
+            !cJSON_IsNumber(j_size) ||
+            !cJSON_IsString(j_sha)) {
+            ESP_LOGW(TAG, "Skipping malformed entry %d", parsed);
+            continue;
+        }
+
+        ota_app_entry_t *entry = &out->apps[parsed];
+
+        if (cJSON_IsString(j_name)) {
+            strlcpy(entry->name, j_name->valuestring, sizeof(entry->name));
+        } else {
+            snprintf(entry->name, sizeof(entry->name), "App %d", parsed + 1);
+        }
+        entry->version = cJSON_IsNumber(j_ver) ? (uint32_t)j_ver->valuedouble : 0;
+        strlcpy(entry->url,    j_url->valuestring, sizeof(entry->url));
+        entry->size = (int)j_size->valuedouble;
+        strlcpy(entry->sha256, j_sha->valuestring, sizeof(entry->sha256));
+
+        cJSON *j_icon = cJSON_GetObjectItem(item, "icon");
+        if (cJSON_IsString(j_icon)) {
+            strlcpy(entry->icon_url, j_icon->valuestring, sizeof(entry->icon_url));
+        } else {
+            entry->icon_url[0] = '\0';
+        }
+
+        ESP_LOGI(TAG, "Catalog[%d]: \"%s\" v%" PRIu32 " (%d B)",
+                 parsed, entry->name, entry->version, entry->size);
+        parsed++;
+    }
     cJSON_Delete(root);
 
-    ESP_LOGI(TAG, "Manifest: v%"PRIu32", size=%d, url=%s",
-             manifest_ver, fw_size, fw_url);
-
-    /* ── Version check ────────────────────────────────────────── */
-    if (manifest_ver <= installed_ver) {
-        ESP_LOGI(TAG, "Up to date (installed v%"PRIu32", manifest v%"PRIu32")",
-                 installed_ver, manifest_ver);
-        show_status("Firmware up to date", NULL);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+    if (parsed == 0) {
+        ESP_LOGW(TAG, "Manifest contains no valid app entries");
+        show_status("No apps in catalog", NULL);
         wifi_sta_disconnect();
-        return OTA_RESULT_UP_TO_DATE;
+        return OTA_RESULT_EMPTY_CATALOG;
     }
 
-    /* ── Verify image fits in the OTA partition ───────────────── */
+    out->count = parsed;
+    ESP_LOGI(TAG, "Catalog ready: %d app(s)", parsed);
+    /* WiFi remains connected for subsequent flash call */
+    return OTA_RESULT_OK;
+}
+
+/* ── Flash selected app ───────────────────────────────────────────── */
+
+ota_result_t ota_manager_flash_app(const ota_app_entry_t *app)
+{
+    ESP_LOGI(TAG, "Flashing \"%s\" v%" PRIu32 " (%d B)",
+             app->name, app->version, app->size);
+
+    /* Verify the image fits */
     const esp_partition_t *update_part = esp_ota_get_next_update_partition(NULL);
     if (!update_part) {
         ESP_LOGE(TAG, "No OTA partition available");
-        wifi_sta_disconnect();
         return OTA_RESULT_FLASH_FAIL;
     }
-    if (fw_size <= 0 || (uint32_t)fw_size > update_part->size) {
-        ESP_LOGE(TAG, "Firmware size %d exceeds partition size %"PRIu32,
-                 fw_size, update_part->size);
-        show_status("OTA: image too large", NULL);
-        wifi_sta_disconnect();
+    if (app->size <= 0 || (uint32_t)app->size > update_part->size) {
+        ESP_LOGE(TAG, "App size %d exceeds partition size %" PRIu32,
+                 app->size, update_part->size);
+        show_status("Image too large", NULL);
         return OTA_RESULT_FLASH_FAIL;
     }
 
-    /* ── Stream download → hash → flash (no PSRAM needed) ────── */
-    show_status("Downloading...", NULL);
-    esp_err_t ota_err = http_stream_and_flash(fw_url, fw_size, sha256_hex);
-    wifi_sta_disconnect();
-    if (ota_err != ESP_OK) {
-        return OTA_RESULT_DOWNLOAD_FAIL;
+    /* Stream + hash + flash */
+    show_status("Downloading...", app->name);
+    esp_err_t err = http_stream_and_flash(app->url, app->size, app->sha256);
+    if (err != ESP_OK) {
+        return (err == ESP_ERR_OTA_VALIDATE_FAILED)
+               ? OTA_RESULT_VERIFY_FAIL
+               : OTA_RESULT_DOWNLOAD_FAIL;
     }
 
-    /* ── Commit version to NVS ───────────────────────────────── */
-    nvs_handle_t hv2;
-    if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE,
-                                NVS_READWRITE, &hv2) == ESP_OK) {
-        nvs_set_u32(hv2, NVS_KEY_OTAVER, manifest_ver);
-        nvs_commit(hv2);
-        nvs_close(hv2);
-    }
-
-    /* ── Reboot into new partition ───────────────────────────── */
-    ESP_LOGI(TAG, "OTA complete — rebooting into v%"PRIu32, manifest_ver);
+    /* Success — reboot into new partition */
+    ESP_LOGI(TAG, "OTA complete — rebooting");
     show_status("Update complete!", "Rebooting...");
     vTaskDelay(pdMS_TO_TICKS(1500));
     esp_restart();
 
-    return OTA_RESULT_UPDATED;  /* unreachable */
+    return OTA_RESULT_OK;  /* unreachable */
 }

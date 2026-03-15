@@ -248,7 +248,7 @@ static const char HTML_FORM_TAIL[] =
     "<input name='pass' type='password' maxlength='64'>"
     "<hr>"
     "<label>App Manifest URL</label>"
-    "<input name='manifest' placeholder='https://yoursite.github.io/catalog.json' maxlength='128'>"
+    "<input name='manifest' value='https://raw.githubusercontent.com/watsonlr/namebadge-apps/main/manifest.json' maxlength='128'>"
     "<button type='submit'>Save Settings</button>"
     "</form></body></html>";
 
