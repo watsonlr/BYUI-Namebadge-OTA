@@ -9,6 +9,7 @@
 #include "portal_mode.h"
 #include "wifi_config.h"
 #include "display.h"
+#include "buttons.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -348,8 +349,13 @@ bool portal_mode_run(int timeout_s)
                                                      DISPLAY_COLOR_GREEN,
                                                      DISPLAY_COLOR_WHITE);
             display_print(&ip_ctx, centre_x(ip_str, 1), 148, ip_str);
+            display_text_ctx_t cont_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
+                                                       DISPLAY_COLOR_BLACK,
+                                                       DISPLAY_COLOR_WHITE);
+            display_print(&cont_ctx, centre_x("Any Button to Continue", 1),
+                          175, "Any Button to Continue");
             ESP_LOGI(TAG, "WiFi test: connected (%s)", ip_str);
-            vTaskDelay(pdMS_TO_TICKS(3000));
+            buttons_wait_press(0);
             break;
         }
 
