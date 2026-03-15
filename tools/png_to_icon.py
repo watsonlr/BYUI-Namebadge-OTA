@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-png_to_icon.py — Convert a PNG to a raw 316×76 RGB565 binary for the BYUI eBadge.
+png_to_icon.py — Convert a PNG to a raw 308×72 RGB565 binary for the BYUI eBadge.
 
-The output is a flat binary of 316×76×2 = 48 032 bytes, each pixel stored
+The output is a flat binary of 308×72×2 = 44 352 bytes, each pixel stored
 big-endian RGB565 (high byte first) — the wire format expected by the ILI9341
 and consumed directly by display_draw_bitmap() on the badge.
 
-Three icons at this size fill the 320×240 display leaving exactly 10 px for the
-navigation hint bar.
+Each icon is blitted centred inside a 76 px tall × 320 px wide tile slot,
+leaving a 6 px coloured border left/right and 2 px top/bottom that shows the
+selection highlight colour when the user scrolls through the app menu.
 
 Usage
 -----
     python tools/png_to_icon.py <input.png> <output.bin>
 
-    input.png   — source image (any size; resized to 316×76 with LANCZOS)
+    input.png   — source image (any size; resized to 308×72 with LANCZOS)
     output.bin  — destination raw binary
 
 Host the .bin files on GitHub (raw.githubusercontent.com) and reference them
 in the app manifest as:
 
-    { "icon": "https://raw.githubusercontent.com/.../icons/my_app.bin", ... }
+    { "icon": "https://raw.githubusercontent.com/.../icons/my_app_icon.bin", ... }
 
 Requirements
 ------------
@@ -30,8 +31,8 @@ import sys
 import os
 from PIL import Image
 
-ICON_W = 316
-ICON_H = 76
+ICON_W = 308
+ICON_H = 72
 
 
 def rgb888_to_rgb565_be(r: int, g: int, b: int) -> int:

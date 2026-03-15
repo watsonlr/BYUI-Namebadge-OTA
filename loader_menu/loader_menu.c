@@ -4,8 +4,10 @@
 #include "buttons.h"
 #include "portal_mode.h"
 #include "ota_manager.h"
+#include "wifi_config.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -46,8 +48,15 @@ static const char *ITEM_LABELS[NUM_ITEMS] = {
     "Load from SD Card",
     "Configure WiFi",
     "Bare-metal / Flash",
-    "Update SD Recovery",
+    "Update SD Recovery",   /* replaced by "Reset Namebadge" when configured */
 };
+
+/* Item 4 swaps label when the badge is already set up. */
+static const char *item_label(int idx)
+{
+    if (idx == 4 && wifi_config_is_configured()) return "Reset Namebadge";
+    return ITEM_LABELS[idx];
+}
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
@@ -91,7 +100,7 @@ static void draw_item(int idx, bool selected)
     }
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "%d. %s", idx + 1, ITEM_LABELS[idx]);
+    snprintf(buf, sizeof(buf), "%s", item_label(idx));
     display_draw_string(ITEM_TEXT_X, y + 10, buf, fg, bg, ITEM_TEXT_SCALE);
 }
 
@@ -140,20 +149,22 @@ static void show_info_screen(const char *title,
  *   Tile 2  y = 154 .. 229  (76 px)
  *   Hint    y = 230 .. 239  (10 px)
  *
- * Icons are 316 px wide; 2 px left/right margins show the selection colour.
+ * Icons are 308×72 px; 6 px L/R and 2 px T/B borders show selection colour.
  * ────────────────────────────────────────────────────────────────────── */
 
-#define ICON_TILE_H   OTA_ICON_H          /* 76                        */
-#define ICON_TILE_W   OTA_ICON_W          /* 316                       */
-#define ICON_X        ((DISPLAY_W - ICON_TILE_W) / 2)   /* 2 px        */
-#define ICON_GAP      1                   /* 1 px dark line between tiles */
-#define ICON_HINT_Y   230                 /* hint bar top              */
-#define ICON_HINT_H   (DISPLAY_H - ICON_HINT_Y)  /* 10 px              */
+#define ICON_SLOT_H   76                               /* tile-slot height      */
+#define ICON_TILE_H   OTA_ICON_H                       /* 72 — bitmap height    */
+#define ICON_TILE_W   OTA_ICON_W                       /* 308 — bitmap width    */
+#define ICON_X        ((DISPLAY_W - ICON_TILE_W) / 2)  /* 6 px L/R border      */
+#define ICON_Y_OFF    ((ICON_SLOT_H - ICON_TILE_H) / 2) /* 2 px T/B border     */
+#define ICON_GAP      1                                /* 1 px dark line between */
+#define ICON_HINT_Y   230                              /* hint bar top          */
+#define ICON_HINT_H   (DISPLAY_H - ICON_HINT_Y)       /* 10 px                 */
 #define VISIBLE_ICONS 3
 
 static int icon_tile_y(int row)
 {
-    return row * (ICON_TILE_H + ICON_GAP);
+    return row * (ICON_SLOT_H + ICON_GAP);
 }
 
 /* Draw one icon tile.  icons[] may contain NULL (failed/no icon). */
@@ -164,11 +175,11 @@ static void draw_icon_tile(int row, const ota_app_entry_t *app,
 
     /* Background / selection frame colour fills the full 320-px width. */
     uint16_t frame = selected ? COLOR_BYUI_BLUE : DISPLAY_RGB565(20, 20, 20);
-    display_fill_rect(0, ty, DISPLAY_W, ICON_TILE_H, frame);
+    display_fill_rect(0, ty, DISPLAY_W, ICON_SLOT_H, frame);
 
     if (icon_pixels) {
-        /* Blit the icon; 2 px coloured margins remain on each side. */
-        display_draw_bitmap(ICON_X, ty, ICON_TILE_W, ICON_TILE_H, icon_pixels);
+        /* Blit the icon; 6 px coloured borders remain L/R, 2 px T/B. */
+        display_draw_bitmap(ICON_X, ty + ICON_Y_OFF, ICON_TILE_W, ICON_TILE_H, icon_pixels);
     } else {
         /* Fallback: name + version centred on a solid tile. */
         int name_w = (int)strlen(app->name) * DISPLAY_FONT_W * 2;
@@ -186,7 +197,7 @@ static void draw_icon_tile(int row, const ota_app_entry_t *app,
 
     /* 1 px gap below (not for the last possible tile row) */
     if (row < VISIBLE_ICONS - 1) {
-        display_fill_rect(0, ty + ICON_TILE_H, DISPLAY_W, ICON_GAP,
+        display_fill_rect(0, ty + ICON_SLOT_H, DISPLAY_W, ICON_GAP,
                           DISPLAY_COLOR_BLACK);
     }
 }
@@ -199,7 +210,7 @@ static void draw_icon_menu(const ota_catalog_t *catalog,
         int idx = scroll + row;
         if (idx >= catalog->count) {
             display_fill_rect(0, icon_tile_y(row), DISPLAY_W,
-                              ICON_TILE_H, DISPLAY_COLOR_BLACK);
+                              ICON_SLOT_H, DISPLAY_COLOR_BLACK);
         } else {
             draw_icon_tile(row, &catalog->apps[idx],
                            icons ? icons[idx] : NULL,
@@ -404,10 +415,55 @@ static void action_sd_recovery(void)
                      lines, sizeof(lines) / sizeof(lines[0]));
 }
 
+/* ── Action: Reset Namebadge ───────────────────────────────────────── */
+
+static void action_reset_namebadge(void)
+{
+    display_fill(DISPLAY_COLOR_BLACK);
+    draw_header_titled("Reset Namebadge");
+
+    const char *lines[] = {
+        "This will erase your name,",
+        "WiFi password, and all",
+        "saved badge settings.",
+        "",
+        "Press A to confirm.",
+    };
+    for (int i = 0; i < (int)(sizeof(lines) / sizeof(lines[0])); i++) {
+        display_draw_string(12, 44 + i * 22, lines[i],
+                            DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, 1);
+    }
+    draw_footer("A:Reset   B:Cancel");
+
+    for (;;) {
+        button_t btn = buttons_wait_press(0);
+
+        if (btn & BTN_A) {
+            display_fill(DISPLAY_COLOR_BLACK);
+            draw_header_titled("Reset Namebadge");
+            const char *msg = "Resetting...";
+            int mw = (int)strlen(msg) * DISPLAY_FONT_W * 2;
+            display_draw_string((DISPLAY_W - mw) / 2, 110,
+                                msg, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, 2);
+            nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
+            vTaskDelay(pdMS_TO_TICKS(800));
+            esp_restart();
+
+        } else if (btn & BTN_B) {
+            return;
+        }
+    }
+}
+
 /* ── Public entry point ────────────────────────────────────────────── */
 
 void loader_menu_run(void)
 {
+    /* Drain any buttons still physically held (boot press, portal exit, etc.) */
+    while (buttons_read() != BTN_NONE) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
     int selection = 0;
 
     draw_menu(selection);
@@ -429,14 +485,17 @@ void loader_menu_run(void)
 
         if (btn & (BTN_A | BTN_RIGHT)) {
             ESP_LOGI(TAG, "Selected item %d: %s",
-                     selection + 1, ITEM_LABELS[selection]);
+                     selection + 1, item_label(selection));
 
             switch (selection) {
             case 0:  action_ota_download();   break;
             case 1:  action_sd_load();        break;
             case 2:  action_configure_wifi(); break;
             case 3:  action_bare_metal();     break;
-            case 4:  action_sd_recovery();    break;
+            case 4:
+                if (wifi_config_is_configured()) action_reset_namebadge();
+                else                             action_sd_recovery();
+                break;
             default: break;
             }
 

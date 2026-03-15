@@ -15,11 +15,12 @@
  *
  * Manifest JSON format — bare array hosted at the URL stored in NVS "mfst":
  *   [
- *     { "name":   "App Name",
+ *     { "name":    "App Name",
  *       "version": 1,
- *       "url":    "https://host/app.bin",
- *       "size":   123456,
- *       "sha256": "64 lowercase hex chars" },
+ *       "url":     "https://raw.githubusercontent.com/.../apps/app.bin",
+ *       "size":    123456,
+ *       "sha256":  "64 lowercase hex chars",
+ *       "icon":    "https://raw.githubusercontent.com/.../icons/app_icon.bin" },
  *     ...
  *   ]
  *
@@ -42,9 +43,9 @@ extern "C" {
 #define OTA_CATALOG_MAX    10    /**< Max apps parsed from one manifest.  */
 
 /* ── Icon dimensions (fixed contract, produced by png_to_icon.py) ──── */
-#define OTA_ICON_W      316      /**< Icon width  in pixels.             */
-#define OTA_ICON_H       76      /**< Icon height in pixels.             */
-#define OTA_ICON_BYTES  (OTA_ICON_W * OTA_ICON_H * 2)  /**< 48 032 B.  */
+#define OTA_ICON_W      308      /**< Icon width  in pixels.             */
+#define OTA_ICON_H       72      /**< Icon height in pixels.             */
+#define OTA_ICON_BYTES  (OTA_ICON_W * OTA_ICON_H * 2)  /**< 44 352 B.  */
 
 /* ── Catalog types ─────────────────────────────────────────────────── */
 
