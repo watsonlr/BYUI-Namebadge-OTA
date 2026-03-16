@@ -36,7 +36,10 @@ static const struct {
 
 void buttons_init(void)
 {
-    /* Reset each pin first — disconnects IO_MUX peripheral assignments. */
+    /* gpio_reset_pin: revokes any peripheral claim on the pad, sets
+     * MCU_SEL = GPIO function, enables pull-up, disables input buffer.
+     * This is required to recover pins that the PSRAM/MSPI init left
+     * driven or in a non-GPIO IO_MUX function before app_main. */
     for (int i = 0; i < (int)BTN_COUNT; i++) {
         gpio_reset_pin(BTN_MAP[i].pin);
     }
@@ -52,42 +55,19 @@ void buttons_init(void)
     };
     gpio_config(&cfg);
 
-    /* Per-pin settle monitoring: log when each pin goes HIGH and when it
-     * gets stuck.  Runs up to 3000 ms so slow or stuck pins are visible. */
-    bool settled[BTN_COUNT] = {0};
-    int  settled_at[BTN_COUNT] = {0};
-    int  all_settled_ms = -1;
-
-    for (int t = 0; t <= 3000; t += POLL_MS) {
-        bool all = true;
-        for (int i = 0; i < (int)BTN_COUNT; i++) {
-            int lv = gpio_get_level(BTN_MAP[i].pin);
-            if (lv == 1 && !settled[i]) {
-                settled[i] = true;
-                settled_at[i] = t;
-                ESP_LOGW(TAG, "  GPIO%d (%s) went HIGH at t=%d ms",
-                         BTN_MAP[i].pin, BTN_MAP[i].name, t);
-            }
-            if (!settled[i]) all = false;
-        }
-        if (all) {
-            all_settled_ms = t;
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    /* Prevent the sleep_gpio auto-switch (enabled at boot for all pins) from
+     * clobbering our active pull-up config when the CPU idles.  Set the sleep
+     * shadow registers to the same INPUT + PULLUP mode so the active state is
+     * preserved regardless of CPU idle depth. */
+    for (int i = 0; i < (int)BTN_COUNT; i++) {
+        gpio_sleep_set_direction(BTN_MAP[i].pin, GPIO_MODE_INPUT);
+        gpio_sleep_set_pull_mode(BTN_MAP[i].pin, GPIO_PULLUP_ONLY);
     }
 
-    if (all_settled_ms >= 0) {
-        ESP_LOGW(TAG, "All buttons settled at %d ms", all_settled_ms);
-    } else {
-        ESP_LOGE(TAG, "TIMEOUT: buttons still LOW after 3000 ms:");
-        for (int i = 0; i < (int)BTN_COUNT; i++) {
-            if (!settled[i]) {
-                ESP_LOGE(TAG, "  GPIO%d (%s) STUCK LOW",
-                         BTN_MAP[i].pin, BTN_MAP[i].name);
-            }
-        }
-    }
+    /* Allow pull-ups to charge the lines before the first read. */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    ESP_LOGW(TAG, "buttons raw after init: 0x%02x", (unsigned)buttons_read());
 }
 
 button_t buttons_read(void)
@@ -118,7 +98,7 @@ bool buttons_held(button_t mask, uint32_t duration_ms)
 button_t buttons_wait_press(uint32_t timeout_ms)
 {
     TickType_t start = xTaskGetTickCount();
-    button_t   last  = buttons_read();  /* snapshot so always-LOW pins don't fire */
+    button_t   last  = buttons_read();  /* snapshot — stuck-LOW pins won't fire */
 
     for (;;) {
         /* Timeout check */

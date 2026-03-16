@@ -110,7 +110,7 @@ static void draw_menu(int selected)
     for (int i = 0; i < NUM_ITEMS; i++) {
         draw_item(i, i == selected);
     }
-    draw_footer("Dn/B:move   Rt/A:select");
+    draw_footer("Dn:down  B:up  Left:select");
 }
 
 /* ── Info / stub screens ───────────────────────────────────────────── */
@@ -427,18 +427,18 @@ static void action_reset_namebadge(void)
         "WiFi password, and all",
         "saved badge settings.",
         "",
-        "Press A to confirm.",
+        "Press Left to confirm.",
     };
     for (int i = 0; i < (int)(sizeof(lines) / sizeof(lines[0])); i++) {
         display_draw_string(12, 44 + i * 22, lines[i],
                             DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, 1);
     }
-    draw_footer("A:Reset   B:Cancel");
+    draw_footer("Lt:Reset   B:Cancel");
 
     for (;;) {
         button_t btn = buttons_wait_press(0);
 
-        if (btn & BTN_A) {
+        if (btn & (BTN_A | BTN_LEFT | BTN_RIGHT)) {
             display_fill(DISPLAY_COLOR_BLACK);
             draw_header_titled("Reset Namebadge");
             const char *msg = "Resetting...";
@@ -462,15 +462,6 @@ void loader_menu_run(void)
     /* Initialise button GPIOs (peripheral init may have cleared pull-ups). */
     buttons_init();
 
-    /* Diagnostic: log raw GPIO state immediately after init.
-     * Any button showing as "pressed" here is stuck LOW (HW or PSRAM conflict). */
-    button_t raw = buttons_read();
-    ESP_LOGW(TAG, "buttons after init: raw=0x%02x  UP=%d DN=%d LT=%d RT=%d A=%d B=%d",
-             raw,
-             (int)!!(raw & BTN_UP), (int)!!(raw & BTN_DOWN),
-             (int)!!(raw & BTN_LEFT), (int)!!(raw & BTN_RIGHT),
-             (int)!!(raw & BTN_A), (int)!!(raw & BTN_B));
-
     int selection = 0;
 
     draw_menu(selection);
@@ -490,7 +481,7 @@ void loader_menu_run(void)
             continue;
         }
 
-        if (btn & (BTN_RIGHT | BTN_A)) {
+        if (btn & (BTN_RIGHT | BTN_A | BTN_LEFT)) {
             ESP_LOGI(TAG, "Selected item %d: %s",
                      selection + 1, item_label(selection));
 
