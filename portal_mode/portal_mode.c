@@ -10,6 +10,7 @@
 #include "wifi_config.h"
 #include "display.h"
 #include "buttons.h"
+#include "esp_system.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -343,20 +344,35 @@ bool portal_mode_run(int timeout_s)
             display_text_ctx_t ok = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
                                                  DISPLAY_COLOR_GREEN,
                                                  DISPLAY_COLOR_WHITE);
-            display_print(&ok, centre_x("WiFi Connected", 2), 125,
+            display_print(&ok, centre_x("WiFi Connected", 2), 100,
                           "WiFi Connected");
             display_text_ctx_t ip_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
                                                      DISPLAY_COLOR_GREEN,
                                                      DISPLAY_COLOR_WHITE);
-            display_print(&ip_ctx, centre_x(ip_str, 1), 148, ip_str);
-            display_text_ctx_t cont_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 1,
-                                                       DISPLAY_COLOR_BLACK,
-                                                       DISPLAY_COLOR_WHITE);
-            display_print(&cont_ctx, centre_x("Any Button to Continue", 1),
-                          175, "Any Button to Continue");
+            display_print(&ip_ctx, centre_x(ip_str, 1), 122, ip_str);
+
+            display_text_ctx_t a_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                                    DISPLAY_COLOR_BLACK,
+                                                    DISPLAY_COLOR_WHITE);
+            display_print(&a_ctx, centre_x("A: Continue", 2), 152,
+                          "A: Continue");
+            display_text_ctx_t b_ctx = DISPLAY_CTX(DISPLAY_FONT_SANS, 2,
+                                                    DISPLAY_COLOR_BLACK,
+                                                    DISPLAY_COLOR_WHITE);
+            display_print(&b_ctx, centre_x("B: Start Over", 2), 178,
+                          "B: Start Over");
+
             ESP_LOGI(TAG, "WiFi test: connected (%s)", ip_str);
-            buttons_wait_press(0);
-            break;
+
+            button_t choice;
+            do { choice = buttons_wait_press(0); } while (!(choice & (BTN_A | BTN_B)));
+
+            if (choice & BTN_B) {
+                ESP_LOGI(TAG, "B pressed — erasing config and restarting");
+                nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
+                esp_restart();
+            }
+            break;  /* A pressed — continue to loader menu */
         }
 
         /* ── Failure screen ─────────────────────────────────────── */

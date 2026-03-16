@@ -110,7 +110,7 @@ static void draw_menu(int selected)
     for (int i = 0; i < NUM_ITEMS; i++) {
         draw_item(i, i == selected);
     }
-    draw_footer("B:move   A:select");
+    draw_footer("Dn/B:move   Rt/A:select");
 }
 
 /* ── Info / stub screens ───────────────────────────────────────────── */
@@ -459,14 +459,8 @@ static void action_reset_namebadge(void)
 
 void loader_menu_run(void)
 {
-    /* Re-initialise GPIOs — peripheral init (SPI, RMT) can clear pull-up
-     * configuration set by the early buttons_init() in app_main(). */
+    /* Initialise button GPIOs (peripheral init may have cleared pull-ups). */
     buttons_init();
-
-    /* Drain A+B specifically — those are the entry combo and may still be held. */
-    while (buttons_read() & (BTN_A | BTN_B)) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
 
     int selection = 0;
 
@@ -475,19 +469,19 @@ void loader_menu_run(void)
     for (;;) {
         button_t btn = buttons_wait_press(0);
 
-        if (btn & (BTN_UP | BTN_LEFT)) {
+        if (btn & (BTN_UP | BTN_B)) {
             selection = (selection - 1 + NUM_ITEMS) % NUM_ITEMS;
             draw_menu(selection);
             continue;
         }
 
-        if (btn & (BTN_DOWN | BTN_B)) {
+        if (btn & BTN_DOWN) {
             selection = (selection + 1) % NUM_ITEMS;
             draw_menu(selection);
             continue;
         }
 
-        if (btn & (BTN_A | BTN_RIGHT)) {
+        if (btn & (BTN_RIGHT | BTN_A)) {
             ESP_LOGI(TAG, "Selected item %d: %s",
                      selection + 1, item_label(selection));
 

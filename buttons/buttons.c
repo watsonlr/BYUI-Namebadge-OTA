@@ -32,6 +32,12 @@ static const struct {
 
 void buttons_init(void)
 {
+    /* Reset each pin first — disconnects IO_MUX peripheral assignments
+     * (e.g. PSRAM / flash controller) that gpio_config() alone won't clear. */
+    for (int i = 0; i < (int)BTN_COUNT; i++) {
+        gpio_reset_pin(BTN_MAP[i].pin);
+    }
+
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << GPIO_UP)    | (1ULL << GPIO_DOWN)  |
                         (1ULL << GPIO_LEFT)   | (1ULL << GPIO_RIGHT) |

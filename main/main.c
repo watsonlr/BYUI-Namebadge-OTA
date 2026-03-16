@@ -37,47 +37,22 @@
  * which is handled by the student app (a separate concern) or by performing
  * a "Reset to blank canvas" from this loader.
  */
-static bool try_launch_student_app(void)
+static void try_launch_student_app(void)
 {
-    /* Walk ota_0 → ota_1 → ota_2 (whichever partitions exist). */
-    const esp_partition_subtype_t ota_subtypes[] = {
-        ESP_PARTITION_SUBTYPE_APP_OTA_0,
-        ESP_PARTITION_SUBTYPE_APP_OTA_1,
-        ESP_PARTITION_SUBTYPE_APP_OTA_2,
-    };
-
-    /* Prefer the partition that otadata already says is active. */
+    /* Only auto-boot if otadata explicitly chose an OTA partition.
+     * If it points to factory (or was erased by the A+B bootloader hook),
+     * respected that intent and stay in the loader. */
     const esp_partition_t *preferred = esp_ota_get_boot_partition();
-    if (preferred &&
-        preferred->subtype != ESP_PARTITION_SUBTYPE_APP_FACTORY) {
-        esp_app_desc_t desc;
-        if (esp_ota_get_partition_description(preferred, &desc) == ESP_OK) {
-            ESP_LOGI(TAG, "Launching preferred OTA app: %s %s",
-                     desc.project_name, desc.version);
-            esp_ota_set_boot_partition(preferred);
-            esp_restart();
-            /* never reached */
-        }
-    }
+    if (!preferred || preferred->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY)
+        return;
 
-    /* Fall back: scan all OTA slots for any valid image. */
-    for (int i = 0; i < (int)(sizeof(ota_subtypes) / sizeof(ota_subtypes[0])); i++) {
-        const esp_partition_t *part = esp_partition_find_first(
-            ESP_PARTITION_TYPE_APP, ota_subtypes[i], NULL);
-        if (!part) continue;
+    esp_app_desc_t desc;
+    if (esp_ota_get_partition_description(preferred, &desc) != ESP_OK)
+        return;  /* OTA slot has no valid image */
 
-        esp_app_desc_t desc;
-        if (esp_ota_get_partition_description(part, &desc) == ESP_OK) {
-            ESP_LOGI(TAG, "Launching OTA app from slot %d: %s %s",
-                     i, desc.project_name, desc.version);
-            esp_ota_set_boot_partition(part);
-            esp_restart();
-            /* never reached */
-        }
-    }
-
-    ESP_LOGW(TAG, "No valid student app found in OTA slots");
-    return false;
+    ESP_LOGI(TAG, "Booting student app: %s %s",
+             desc.project_name, desc.version);
+    esp_restart();  /* bootloader reads otadata → boots OTA partition */
 }
 
 /* ── Factory loader full initialisation ────────────────────────────── */
@@ -119,32 +94,10 @@ static void run_factory_loader(void)
 
 void app_main(void)
 {
-    /*
-     * Stage 1 — quick button check (before any peripheral init).
-     *
-     * buttons_init() only configures GPIO — it is safe to call here.
-     * If A+B are held for LOADER_HOLD_MS we enter the factory loader.
-     * Otherwise we attempt to boot the installed student app immediately.
-     */
-    buttons_init();
+    /* If otadata points to a student app, boot it directly.
+     * If otadata was erased (A+B held at power-on via bootloader hook),
+     * preferred will be factory and we fall through to the loader. */
+    try_launch_student_app();
 
-    bool enter_loader = buttons_held(BTN_A | BTN_B, LOADER_HOLD_MS);
-
-    if (!enter_loader) {
-        /* Try to hand off to a student app.  Falls through if none exists. */
-        if (try_launch_student_app()) {
-            /* try_launch_student_app() only returns false — never true. */
-        }
-        /* No student app installed → fall into the loader automatically. */
-        ESP_LOGI(TAG, "No student app — entering factory loader");
-    } else {
-        ESP_LOGI(TAG, "A+B held — entering factory loader");
-    }
-
-    /*
-     * Stage 2 — factory loader.
-     *
-     * Reached when: A+B held at boot, OR no valid student app installed.
-     */
     run_factory_loader();
 }
