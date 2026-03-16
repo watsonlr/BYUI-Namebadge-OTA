@@ -462,6 +462,15 @@ void loader_menu_run(void)
     /* Initialise button GPIOs (peripheral init may have cleared pull-ups). */
     buttons_init();
 
+    /* Diagnostic: log raw GPIO state immediately after init.
+     * Any button showing as "pressed" here is stuck LOW (HW or PSRAM conflict). */
+    button_t raw = buttons_read();
+    ESP_LOGW(TAG, "buttons after init: raw=0x%02x  UP=%d DN=%d LT=%d RT=%d A=%d B=%d",
+             raw,
+             (int)!!(raw & BTN_UP), (int)!!(raw & BTN_DOWN),
+             (int)!!(raw & BTN_LEFT), (int)!!(raw & BTN_RIGHT),
+             (int)!!(raw & BTN_A), (int)!!(raw & BTN_B));
+
     int selection = 0;
 
     draw_menu(selection);

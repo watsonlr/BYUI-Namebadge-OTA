@@ -89,8 +89,8 @@ Power On → ROM → 2nd-stage bootloader → factory loader app
 
 ## Development Environment
 
-- **ESP-IDF:** v5.5, path `/home/lynn/esp-idf/`
-- **Activate:** `source /home/lynn/esp-idf/export.sh`
+- **ESP-IDF:** v5.5, path `/home/lynn/esp/esp-idf/`
+- **Activate:** `source /home/lynn/esp/esp-idf/export.sh`
 - **Target:** `esp32s3`
 - **Build:** `idf.py build` (output: `build/ebadge_app.bin`, ~1.1 MB)
 - **Flash (Linux):** `idf.py -p /dev/ttyUSB0 flash monitor`
