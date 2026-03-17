@@ -2,10 +2,9 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
-#include "soc/gpio_periph.h"
-#include "soc/io_mux_reg.h"
-#include "soc/gpio_reg.h"
 
 #define TAG "buttons"
 
@@ -17,48 +16,63 @@
 #define GPIO_A      38
 #define GPIO_B      18
 
-#define POLL_MS     20
-#define DEBOUNCE_MS 30
+#define POLL_MS     10
+#define DEBOUNCE_MS 20
 
-static const struct {
+static struct {
     gpio_num_t pin;
     button_t   bit;
-    const char *name;
 } BTN_MAP[] = {
-    { GPIO_UP,    BTN_UP,    "UP"    },
-    { GPIO_DOWN,  BTN_DOWN,  "DOWN"  },
-    { GPIO_LEFT,  BTN_LEFT,  "LEFT"  },
-    { GPIO_RIGHT, BTN_RIGHT, "RIGHT" },
-    { GPIO_A,     BTN_A,     "A"     },
-    { GPIO_B,     BTN_B,     "B"     },
+    { GPIO_UP,    BTN_UP    },
+    { GPIO_DOWN,  BTN_DOWN  },
+    { GPIO_LEFT,  BTN_LEFT  },
+    { GPIO_RIGHT, BTN_RIGHT },
+    { GPIO_A,     BTN_A     },
+    { GPIO_B,     BTN_B     },
 };
+#define BTN_COUNT        (sizeof(BTN_MAP) / sizeof(BTN_MAP[0]))
+#define BUTTON_QUEUE_LEN 8
 
-#define BTN_COUNT  (sizeof(BTN_MAP) / sizeof(BTN_MAP[0]))
+static QueueHandle_t button_event_queue = NULL;
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
+static void button_task(void *arg)
+{
+    button_t prev_state = BTN_NONE;
+    ESP_LOGI(TAG, "button_task started (core %d)", xPortGetCoreID());
+    for (;;) {
+        button_t curr_state = BTN_NONE;
+        for (int i = 0; i < (int)BTN_COUNT; i++) {
+            if (gpio_get_level(BTN_MAP[i].pin) == 0) {
+                curr_state |= BTN_MAP[i].bit;
+            }
+        }
+        // Detect new presses
+        for (int i = 0; i < (int)BTN_COUNT; i++) {
+            bool was_pressed = (prev_state & BTN_MAP[i].bit);
+            bool is_pressed = (curr_state & BTN_MAP[i].bit);
+            if (!was_pressed && is_pressed) {
+                // Debounce: wait 10ms, confirm still pressed
+                vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
+                if (gpio_get_level(BTN_MAP[i].pin) == 0) {
+                    button_t event = BTN_MAP[i].bit;
+                    ESP_LOGI(TAG, "Button pressed: 0x%02X, posting to queue (core %d)", event, xPortGetCoreID());
+                    BaseType_t sent = xQueueSend(button_event_queue, &event, 0);
+                    if (sent != pdTRUE) {
+                        ESP_LOGW(TAG, "Queue full! Could not post event 0x%02X", event);
+                    }
+                }
+            }
+        }
+        prev_state = curr_state;
+        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    }
+}
+
 void buttons_init(void)
 {
-    /* Clear any GPIO pad hold that sleep_gpio may have set before app_main.
-     * This releases both RTC_CNTL_PAD_HOLD_REG and DIG_PAD_HOLD for all pads,
-     * allowing subsequent gpio_config writes to take effect. */
     gpio_force_unhold_all();
-
-    /* gpio_reset_pin: revokes any peripheral claim on the pad, sets
-     * MCU_SEL = GPIO function, enables pull-up, disables input buffer.
-     * This is required to recover pins that the PSRAM/MSPI init left
-     * driven or in a non-GPIO IO_MUX function before app_main. */
-    for (int i = 0; i < (int)BTN_COUNT; i++) {
-        gpio_reset_pin(BTN_MAP[i].pin);
-    }
-
-    /* Diagnostic: state immediately after gpio_reset_pin (before gpio_config) */
-    ESP_LOGW(TAG, "PRE-CFG ENABLE=0x%08x ENABLE1=0x%08x",
-             (unsigned)REG_READ(GPIO_ENABLE_REG),
-             (unsigned)REG_READ(GPIO_ENABLE1_REG));
-    ESP_LOGW(TAG, "PRE-CFG IN=0x%08x IN1=0x%08x",
-             (unsigned)REG_READ(GPIO_IN_REG),
-             (unsigned)REG_READ(GPIO_IN1_REG));
 
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << GPIO_UP)    | (1ULL << GPIO_DOWN)  |
@@ -71,73 +85,14 @@ void buttons_init(void)
     };
     gpio_config(&cfg);
 
-    /* sleep_gpio (runs at ~434 ms, before app_main) writes SLP_SEL=1 into every
-     * IO_MUX register and sets the sleep-shadow to DISABLED+FLOATING.
-     * With SLP_SEL=1 the IO_MUX routes the pad signal to the LP subsystem
-     * instead of the GPIO matrix, so gpio_get_level() always returns 0.
-     *
-     * Fix:
-     *  1. Set sleep shadow (MCU_xxx) to INPUT+PULLUP so the pin behaves
-     *     correctly if the chip ever enters light sleep.
-     *  2. Clear SLP_SEL → restores active (FUN_xxx) path through the GPIO
-     *     matrix, making gpio_get_level() work again. */
-    for (int i = 0; i < (int)BTN_COUNT; i++) {
-        gpio_sleep_set_direction(BTN_MAP[i].pin, GPIO_MODE_INPUT);
-        gpio_sleep_set_pull_mode(BTN_MAP[i].pin, GPIO_PULLUP_ONLY);
-        PIN_SLP_SEL_DISABLE(GPIO_PIN_MUX_REG[BTN_MAP[i].pin]);
-    }
-
-    /* Diagnostic: briefly drive each pin HIGH (output), read back, restore input.
-     * If GPIO_IN shows 1 when driven HIGH → GPIO matrix path works, something
-     * external is holding the pin LOW in input mode.
-     * If GPIO_IN stays 0 even when driven HIGH → GPIO matrix path is broken. */
-    for (int i = 0; i < (int)BTN_COUNT; i++) {
-        gpio_num_t pin = BTN_MAP[i].pin;
-        /* GPIO_MODE_INPUT_OUTPUT keeps FUN_IE=1 so gpio_get_level reads pad */
-        gpio_set_direction(pin, GPIO_MODE_INPUT_OUTPUT);
-        PIN_SLP_SEL_DISABLE(GPIO_PIN_MUX_REG[pin]);
-        /* Read ENABLE_REG right now — if the bit is 0 despite OUTPUT mode,
-         * digital pad hold is blocking the write. */
-        uint32_t en_val = (pin < 32) ? REG_READ(GPIO_ENABLE_REG)
-                                     : REG_READ(GPIO_ENABLE1_REG);
-        int en_bit = (en_val >> (pin < 32 ? pin : (pin - 32))) & 1;
-        gpio_set_level(pin, 1);
-        int driven_hi = gpio_get_level(pin);
-        gpio_set_level(pin, 0);
-        int driven_lo = gpio_get_level(pin);
-        /* Restore to input+pullup */
-        gpio_set_direction(pin, GPIO_MODE_INPUT);
-        gpio_pullup_en(pin);
-        PIN_SLP_SEL_DISABLE(GPIO_PIN_MUX_REG[pin]);
-        int as_input = gpio_get_level(pin);
-        ESP_LOGW(TAG, "pin%d: en=%d drv_hi=%d drv_lo=%d as_input=%d",
-                 pin, en_bit, driven_hi, driven_lo, as_input);
-    }
-
-    /* Diagnostic: dump GPIO output enable and func_out_sel_cfg for each button pin */
-    ESP_LOGW(TAG, "ENABLE=0x%08x ENABLE1=0x%08x OUT=0x%08x OUT1=0x%08x",
-             (unsigned)REG_READ(GPIO_ENABLE_REG),
-             (unsigned)REG_READ(GPIO_ENABLE1_REG),
-             (unsigned)REG_READ(GPIO_OUT_REG),
-             (unsigned)REG_READ(GPIO_OUT1_REG));
-    for (int i = 0; i < (int)BTN_COUNT; i++) {
-        gpio_num_t pin = BTN_MAP[i].pin;
-        uint32_t mux = REG_READ(GPIO_PIN_MUX_REG[pin]);
-        uint32_t sel = REG_READ(GPIO_FUNC0_OUT_SEL_CFG_REG + pin * 4);
-        ESP_LOGW(TAG, "pin%d mux=0x%04x(IE=%d PU=%d SLP=%d) sel=0x%04x(sig=%d oen_sel=%d) level=%d",
-                 pin, (unsigned)mux,
-                 (int)((mux >> 9) & 1), (int)((mux >> 8) & 1), (int)((mux >> 1) & 1),
-                 (unsigned)sel, (int)(sel & 0x1ff), (int)((sel >> 10) & 1),
-                 gpio_get_level(pin));
-    }
-    ESP_LOGW(TAG, "GPIO_IN=0x%08x IN1=0x%08x",
-             (unsigned)REG_READ(GPIO_IN_REG),
-             (unsigned)REG_READ(GPIO_IN1_REG));
-
-    /* Allow pull-ups to charge the lines before the first read. */
+    /* Allow pull-ups to charge before any reads. */
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    ESP_LOGW(TAG, "buttons raw after init: 0x%02x", (unsigned)buttons_read());
+    // Create event queue
+    button_event_queue = xQueueCreate(BUTTON_QUEUE_LEN, sizeof(button_t));
+    // Start polling task
+    xTaskCreatePinnedToCore(button_task, "button_task", 2048, NULL, 10, NULL, 0);
+    ESP_LOGI(TAG, "buttons ready (queue event mode)");
 }
 
 button_t buttons_read(void)
@@ -154,49 +109,33 @@ button_t buttons_read(void)
 bool buttons_held(button_t mask, uint32_t duration_ms)
 {
     uint32_t held_ms = 0;
-
     while (held_ms < duration_ms) {
-        if ((buttons_read() & mask) != mask) {
-            return false;   /* any button in the mask released → fail */
-        }
+        if ((buttons_read() & mask) != mask) return false;
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         held_ms += POLL_MS;
     }
     return true;
 }
 
-button_t buttons_wait_press(uint32_t timeout_ms)
-{
-    TickType_t start = xTaskGetTickCount();
-    button_t   last  = buttons_read();  /* snapshot — stuck-LOW pins won't fire */
-
-    for (;;) {
-        /* Timeout check */
-        if (timeout_ms > 0) {
-            uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - start)
-                                          * portTICK_PERIOD_MS);
-            if (elapsed >= timeout_ms) {
-                return BTN_NONE;
-            }
-        }
-
-        button_t cur     = buttons_read();
-        button_t pressed = cur & ~last;   /* newly pressed buttons this poll */
-        last = cur;
-
-        if (pressed) {
-            /* Debounce: re-read after DEBOUNCE_MS */
-            vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
-            button_t confirmed = buttons_read() & pressed;
-            if (confirmed) {
-                /* Wait for full release so caller doesn't re-trigger */
-                while (buttons_read() & confirmed) {
-                    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
-                }
-                return confirmed;
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+// Flush any queued button events (phantom presses) after boot
+void buttons_flush_events(void) {
+    button_t event;
+    int flushed = 0;
+    while (xQueueReceive(button_event_queue, &event, 0) == pdTRUE) {
+        flushed++;
     }
+    ESP_LOGI(TAG, "buttons_flush_events: flushed %d events after boot", flushed);
+}
+
+// Wait for any button event (returns bitmask of pressed button, or BTN_NONE on timeout)
+button_t buttons_wait_event(uint32_t timeout_ms)
+{
+    button_t event = BTN_NONE;
+    ESP_LOGI(TAG, "buttons_wait_event: waiting for event (timeout=%u ms, core %d)", timeout_ms, xPortGetCoreID());
+    if (xQueueReceive(button_event_queue, &event, timeout_ms ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY) == pdTRUE) {
+        ESP_LOGI(TAG, "buttons_wait_event: got event 0x%02X (core %d)", event, xPortGetCoreID());
+        return event;
+    }
+    ESP_LOGI(TAG, "buttons_wait_event: timeout (core %d)", xPortGetCoreID());
+    return BTN_NONE;
 }

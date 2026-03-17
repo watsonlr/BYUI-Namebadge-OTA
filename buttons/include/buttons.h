@@ -1,3 +1,4 @@
+void buttons_flush_events(void);
 /**
  * @file buttons.h
  * @brief Polled GPIO driver for all six badge buttons.
@@ -62,7 +63,21 @@ bool buttons_held(button_t mask, uint32_t duration_ms);
  * @return Bitmask of the button(s) that triggered the event, or BTN_NONE on
  *         timeout.
  */
-button_t buttons_wait_press(uint32_t timeout_ms);
+
+/**
+ * @brief Wait for a specific button to be pressed (semaphore-based).
+ * @param btn         Button bitmask (BTN_UP, BTN_DOWN, etc.)
+ * @param timeout_ms  Maximum wait in ms.  Pass 0 to wait indefinitely.
+ * @return true if pressed, false on timeout.
+ */
+bool buttons_wait_button(button_t btn, uint32_t timeout_ms);
+
+/**
+ * @brief Wait for any button event (queue-based).
+ * @param timeout_ms  Maximum wait in ms.  Pass 0 to wait indefinitely.
+ * @return Bitmask of the button pressed, or BTN_NONE on timeout.
+ */
+button_t buttons_wait_event(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

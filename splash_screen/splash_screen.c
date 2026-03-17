@@ -9,6 +9,7 @@
 
 #include "splash_screen.h"
 #include "display.h"
+#include "buttons.h"
 #include "image_rgb565.h"
 
 #include "freertos/FreeRTOS.h"
@@ -41,4 +42,11 @@ void splash_screen_run(void)
 
     ESP_LOGI(TAG, "Splash complete, holding %d ms.", SPLASH_HOLD_MS);
     vTaskDelay(pdMS_TO_TICKS(SPLASH_HOLD_MS));
+
+    /* Drain any buttons held during the animation so the next
+     * buttons_wait_press() call starts from a clean released state.
+     * Bounded to avoid blocking forever if a button is physically stuck. */
+    for (int t = 0; t < 300 && buttons_read() != BTN_NONE; t += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }

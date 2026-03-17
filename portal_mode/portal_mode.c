@@ -365,7 +365,12 @@ bool portal_mode_run(int timeout_s)
             ESP_LOGI(TAG, "WiFi test: connected (%s)", ip_str);
 
             button_t choice;
-            do { choice = buttons_wait_press(0); } while (!(choice & (BTN_A | BTN_B)));
+            int portal_btn_iter = 0;
+            do {
+                ESP_LOGI(TAG, "portal_mode: waiting for A/B, iter %d", portal_btn_iter++);
+                choice = buttons_wait_event(0);
+                ESP_LOGI(TAG, "portal_mode: got button event 0x%02X", choice);
+            } while (!(choice & (BTN_A | BTN_B)));
 
             if (choice & BTN_B) {
                 ESP_LOGI(TAG, "B pressed — erasing config and restarting");

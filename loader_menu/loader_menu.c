@@ -1,3 +1,4 @@
+
 #include "loader_menu.h"
 
 #include "display.h"
@@ -39,22 +40,21 @@
 #define ITEM_ARROW_X     8
 #define ITEM_TEXT_X     32
 
-#define NUM_ITEMS     5
-#define VISIBLE_APPS  5          /* max app rows visible at once        */
+#define NUM_ITEMS     4
+#define VISIBLE_APPS  4          /* max app rows visible at once        */
 
 /* ── Main menu labels ──────────────────────────────────────────────── */
 static const char *ITEM_LABELS[NUM_ITEMS] = {
     "OTA App Download",
     "Load from SD Card",
-    "Configure WiFi",
     "Bare-metal / Flash",
     "Update SD Recovery",   /* replaced by "Reset Namebadge" when configured */
 };
 
-/* Item 4 swaps label when the badge is already set up. */
+/* Item 3 swaps label when the badge is already set up. */
 static const char *item_label(int idx)
 {
-    if (idx == 4 && wifi_config_is_configured()) return "Reset Namebadge";
+    if (idx == 3 && wifi_config_is_configured()) return "Reset Namebadge";
     return ITEM_LABELS[idx];
 }
 
@@ -107,17 +107,19 @@ static void draw_item(int idx, bool selected)
 static void draw_menu(int selected)
 {
     draw_header_titled("BYUI Badge Loader");
+    /* Fill the 2px gap between header and first item (y=30-31). */
+    display_fill_rect(0, HEADER_H, DISPLAY_W, ITEMS_START - HEADER_H, DISPLAY_COLOR_BLACK);
     for (int i = 0; i < NUM_ITEMS; i++) {
         draw_item(i, i == selected);
     }
-    draw_footer("Dn:down  B:up  Left:select");
+    draw_footer("Up/Dn:move  Right/A:select");
 }
 
 /* ── Info / stub screens ───────────────────────────────────────────── */
 
 static void wait_any_button(void)
 {
-    buttons_wait_press(0);
+    buttons_wait_event(0);
 }
 
 static void show_info_screen(const char *title,
@@ -206,6 +208,7 @@ static void draw_icon_menu(const ota_catalog_t *catalog,
                            uint16_t * const icons[],
                            int selection, int scroll)
 {
+    display_fill(DISPLAY_COLOR_BLACK);
     for (int row = 0; row < VISIBLE_ICONS; row++) {
         int idx = scroll + row;
         if (idx >= catalog->count) {
@@ -221,8 +224,8 @@ static void draw_icon_menu(const ota_catalog_t *catalog,
     /* Hint bar */
     display_fill_rect(0, ICON_HINT_Y, DISPLAY_W, ICON_HINT_H, COLOR_FOOTER_BG);
     const char *hint = (catalog->count > 1)
-                       ? "Up/Dn:move  A:select  B:back"
-                       : "A:select  B:back";
+                       ? "Up/Dn:move  Left:select  B:back"
+                       : "Left:select  B:back";
     int hw = (int)strlen(hint) * DISPLAY_FONT_W;
     display_draw_string((DISPLAY_W - hw) / 2, ICON_HINT_Y + 1,
                         hint, DISPLAY_COLOR_WHITE, COLOR_FOOTER_BG, 1);
@@ -242,9 +245,9 @@ static int run_app_select_menu(const ota_catalog_t *catalog,
     draw_icon_menu(catalog, icons, selection, scroll);
 
     for (;;) {
-        button_t btn = buttons_wait_press(0);
+        button_t btn = buttons_wait_event(0);
 
-        if (btn & (BTN_UP | BTN_LEFT)) {
+        if (btn & BTN_UP) {
             if (selection > 0) {
                 selection--;
                 if (selection < scroll) scroll = selection;
@@ -259,7 +262,7 @@ static int run_app_select_menu(const ota_catalog_t *catalog,
                 draw_icon_menu(catalog, icons, selection, scroll);
             }
 
-        } else if (btn & (BTN_A | BTN_RIGHT)) {
+        } else if (btn & (BTN_LEFT | BTN_A | BTN_RIGHT)) {
             return selection;
 
         } else if (btn & BTN_B) {
@@ -320,11 +323,16 @@ static void action_ota_download(void)
                             prog, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, 1);
 
         s_icons[i] = ota_manager_fetch_icon(s_catalog.apps[i].icon_url);
-        /* NULL on failure — draw_icon_tile shows a text fallback */
+        ESP_LOGI(TAG, "icon[%d]: %s", i, s_icons[i] ? "loaded" : "NULL (will use text fallback)");
     }
 
     /* ── Step 3: present icon tile selection menu ──────────────────── */
+    /* White flash resets TN-panel pixels to max voltage; black hold lets
+     * them fully settle before drawing dark icon-tile backgrounds. */
+    display_fill(DISPLAY_COLOR_WHITE);
+    vTaskDelay(pdMS_TO_TICKS(120));
     display_fill(DISPLAY_COLOR_BLACK);
+    vTaskDelay(pdMS_TO_TICKS(400));
     int sel = run_app_select_menu(&s_catalog, (uint16_t * const *)s_icons);
 
     if (sel < 0) {
@@ -416,85 +424,43 @@ static void action_sd_recovery(void)
                      lines, sizeof(lines) / sizeof(lines[0]));
 }
 
-/* ── Action: Reset Namebadge ───────────────────────────────────────── */
-
-static void action_reset_namebadge(void)
-{
-    display_fill(DISPLAY_COLOR_BLACK);
-    draw_header_titled("Reset Namebadge");
-
-    const char *lines[] = {
-        "This will erase your name,",
-        "WiFi password, and all",
-        "saved badge settings.",
-        "",
-        "Press Left to confirm.",
-    };
-    for (int i = 0; i < (int)(sizeof(lines) / sizeof(lines[0])); i++) {
-        display_draw_string(12, 44 + i * 22, lines[i],
-                            DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, 1);
-    }
-    draw_footer("Lt:Reset   B:Cancel");
-
-    for (;;) {
-        button_t btn = buttons_wait_press(0);
-
-        if (btn & (BTN_A | BTN_LEFT | BTN_RIGHT)) {
-            display_fill(DISPLAY_COLOR_BLACK);
-            draw_header_titled("Reset Namebadge");
-            const char *msg = "Resetting...";
-            int mw = (int)strlen(msg) * DISPLAY_FONT_W * 2;
-            display_draw_string((DISPLAY_W - mw) / 2, 110,
-                                msg, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, 2);
-            nvs_flash_erase_partition(WIFI_CONFIG_NVS_PARTITION);
-            vTaskDelay(pdMS_TO_TICKS(800));
-            esp_restart();
-
-        } else if (btn & BTN_B) {
-            return;
-        }
-    }
-}
-
 /* ── Public entry point ────────────────────────────────────────────── */
 
 void loader_menu_run(void)
 {
     int selection = 0;
-
     draw_menu(selection);
-
+    ESP_LOGI(TAG, "loader_menu_run: entering menu loop");
     for (;;) {
-        button_t btn = buttons_wait_press(0);
-
-        if (btn & (BTN_UP | BTN_B)) {
+        button_t btn = buttons_wait_event(0);
+        ESP_LOGI(TAG, "loader_menu_run: got button event 0x%02X", btn);
+        if (btn & (BTN_UP | BTN_LEFT)) {
             selection = (selection - 1 + NUM_ITEMS) % NUM_ITEMS;
             draw_menu(selection);
             continue;
         }
-
-        if (btn & BTN_DOWN) {
+        if (btn & (BTN_DOWN | BTN_B)) {
             selection = (selection + 1) % NUM_ITEMS;
             draw_menu(selection);
             continue;
         }
-
-        if (btn & (BTN_RIGHT | BTN_A | BTN_LEFT)) {
+        if (btn & (BTN_RIGHT | BTN_A)) {
             ESP_LOGI(TAG, "Selected item %d: %s",
                      selection + 1, item_label(selection));
-
             switch (selection) {
             case 0:  action_ota_download();   break;
             case 1:  action_sd_load();        break;
-            case 2:  action_configure_wifi(); break;
-            case 3:  action_bare_metal();     break;
-            case 4:
-                if (wifi_config_is_configured()) action_reset_namebadge();
-                else                             action_sd_recovery();
+            case 2:  action_bare_metal();     break;
+            case 3:
+                if (wifi_config_is_configured()) {
+                    action_reset_namebadge();
+                } else {
+                    action_sd_recovery();
+                }
                 break;
             default: break;
             }
-
+            display_fill(DISPLAY_COLOR_BLACK);
             draw_menu(selection);
         }
     }
