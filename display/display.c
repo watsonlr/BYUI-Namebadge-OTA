@@ -532,8 +532,18 @@ void display_draw_bitmap(int x, int y, int w, int h, const uint16_t *pixels)
     /* Set the address window once; ILI9341 auto-advances after each row. */
     set_window((uint16_t)x, (uint16_t)y,
                (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+
+    /* The .bin pixel buffer stores each pixel as a little-endian uint16_t
+     * (native host order on ESP32), so pixels[col] yields the correct
+     * RGB565 value.  pack_pixel converts each to big-endian wire order
+     * (high byte first) as the ILI9341 requires. */
+    uint8_t row_buf[DISPLAY_W * 2];
     for (int row = 0; row < h; row++) {
-        write_pixels((const uint8_t *)(pixels + row * w), w * 2);
+        const uint16_t *src = pixels + row * w;
+        for (int col = 0; col < w; col++) {
+            pack_pixel(&row_buf[col * 2], src[col]);
+        }
+        write_pixels(row_buf, w * 2);
     }
 }
 

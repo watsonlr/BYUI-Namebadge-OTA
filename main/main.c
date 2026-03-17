@@ -1,7 +1,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_psram.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
@@ -59,13 +58,10 @@ static void try_launch_student_app(void)
 
 static void run_factory_loader(void)
 {
-    /* Log PSRAM availability (informational). */
-    size_t psram = esp_psram_get_size();
-    if (psram > 0) {
-        ESP_LOGI(TAG, "PSRAM: %u bytes", (unsigned)psram);
-    } else {
-        ESP_LOGW(TAG, "PSRAM not available");
-    }
+    /* Init buttons FIRST — before display_init/leds_init/nvs_flash_init —
+     * to isolate whether PSRAM probe (pre-app_main) or a later peripheral
+     * init is holding the pads at 0V. */
+    buttons_init();
 
     nvs_flash_init();
     display_init();

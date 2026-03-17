@@ -19,16 +19,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
 # ─── PSRAM ───────────────────────────────────────────────────────
-# N4R2 has 2 MB octal SPI PSRAM (AP Memory).  Must use OCT mode —
-# quad mode (the IDF default) returns ID 0x00000000 and fails.
-# IGNORE_NOTFOUND lets the board boot even if PSRAM init fails.
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_SPEED_40M=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_SPIRAM_TYPE_AUTO=y
-CONFIG_SPIRAM_BOOT_INIT=y
-CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+# N8 module has no PSRAM — SPIRAM probe must be disabled.
+# With CONFIG_SPIRAM=y the MSPI init runs before app_main and leaves
+# the button GPIO pads (GPIO14-18, GPIO38) held at 0V.
+# CONFIG_SPIRAM is not set
 
 # ─── Console via UART0 → CP2102N (COM8) ──────────────────────────
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y

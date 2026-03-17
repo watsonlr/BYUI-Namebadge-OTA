@@ -324,6 +324,7 @@ static void action_ota_download(void)
     }
 
     /* ── Step 3: present icon tile selection menu ──────────────────── */
+    display_fill(DISPLAY_COLOR_BLACK);
     int sel = run_app_select_menu(&s_catalog, (uint16_t * const *)s_icons);
 
     if (sel < 0) {
@@ -459,9 +460,6 @@ static void action_reset_namebadge(void)
 
 void loader_menu_run(void)
 {
-    /* Initialise button GPIOs (peripheral init may have cleared pull-ups). */
-    buttons_init();
-
     int selection = 0;
 
     draw_menu(selection);
