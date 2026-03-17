@@ -112,6 +112,10 @@ static void draw_menu(int selected)
     for (int i = 0; i < NUM_ITEMS; i++) {
         draw_item(i, i == selected);
     }
+    /* Fill any gap between last item and footer (appears when NUM_ITEMS < 5). */
+    int gap_top = ITEMS_START + NUM_ITEMS * ITEM_H;
+    if (gap_top < FOOTER_Y)
+        display_fill_rect(0, gap_top, DISPLAY_W, FOOTER_Y - gap_top, DISPLAY_COLOR_BLACK);
     draw_footer("Up/Dn:move  Right/A:select");
 }
 
@@ -208,12 +212,12 @@ static void draw_icon_menu(const ota_catalog_t *catalog,
                            uint16_t * const icons[],
                            int selection, int scroll)
 {
-    display_fill(DISPLAY_COLOR_BLACK);
+    display_fill(DISPLAY_COLOR_WHITE);
     for (int row = 0; row < VISIBLE_ICONS; row++) {
         int idx = scroll + row;
         if (idx >= catalog->count) {
             display_fill_rect(0, icon_tile_y(row), DISPLAY_W,
-                              ICON_SLOT_H, DISPLAY_COLOR_BLACK);
+                              ICON_SLOT_H, DISPLAY_COLOR_WHITE);
         } else {
             draw_icon_tile(row, &catalog->apps[idx],
                            icons ? icons[idx] : NULL,
@@ -327,12 +331,11 @@ static void action_ota_download(void)
     }
 
     /* ── Step 3: present icon tile selection menu ──────────────────── */
-    /* White flash resets TN-panel pixels to max voltage; black hold lets
-     * them fully settle before drawing dark icon-tile backgrounds. */
+    /* White fill drives all TN pixels to bright; hold for 600 ms so the
+     * liquid crystals fully respond before dark tile backgrounds are drawn.
+     * Without the delay the old menu ghost bleeds through. */
     display_fill(DISPLAY_COLOR_WHITE);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    display_fill(DISPLAY_COLOR_BLACK);
-    vTaskDelay(pdMS_TO_TICKS(400));
+    vTaskDelay(pdMS_TO_TICKS(600));
     int sel = run_app_select_menu(&s_catalog, (uint16_t * const *)s_icons);
 
     if (sel < 0) {

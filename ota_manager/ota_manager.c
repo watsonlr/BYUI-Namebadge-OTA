@@ -581,6 +581,10 @@ ota_result_t ota_manager_flash_app(const ota_app_entry_t *app)
     ESP_LOGI(TAG, "OTA complete — rebooting");
     show_status("Update complete!", "Rebooting...");
     vTaskDelay(pdMS_TO_TICKS(1500));
+    /* White fill lets TN pixels settle to a clean state so the student app
+     * does not inherit the loader menu ghost on its first frame. */
+    display_fill(DISPLAY_COLOR_WHITE);
+    vTaskDelay(pdMS_TO_TICKS(600));
     esp_restart();
 
     return OTA_RESULT_OK;  /* unreachable */
